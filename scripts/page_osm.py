@@ -3,7 +3,7 @@ import geopandas as gpd
 import pandas as pd
 from streamlit_folium import st_folium
 import time
-from shapely.geometry import Point, shape  # NOUVEL IMPORT : 'shape' ajouté ici
+from shapely.geometry import Point, shape
 
 # Imports depuis vos modules personnalisés
 from fonctions_basiques import (
@@ -12,11 +12,13 @@ from fonctions_basiques import (
 )
 from fonctions_cartographie import (
     transfo_geodataframe, creer_carte_enrichie, rechercher_poi_osm,
-    geocoder_adresse_nominatim, creer_carte_implantation, calculer_isochrone_et_cacher
+    geocoder_adresse_nominatim, creer_carte_implantation, calculer_isochrone_et_cacher,
+    rechercher_batiments_osm
 )
 from interface import (
     interface_recherche_osm, interface_selection_socio,
-    interface_selection_poi, interface_point_interet, POI_CONFIG
+    interface_selection_poi, interface_point_interet, POI_CONFIG,
+    interface_selection_batiments
 )
 
 
@@ -29,7 +31,7 @@ def render_tab_concurrence(df_communes, df_coefficients, gdf_socio_filtre, indic
     df_etablissements_osm = interface_recherche_osm(df_communes, key_prefix="concurrence")
 
     if not df_etablissements_osm.empty:
-        st.header("Résultats de l'analyse de concurrence")
+        st.header("✔️ Résultats de l'analyse de concurrence")
 
         df_etablissements_osm[["adresse_simplifiee", "precision_geocodage"]] = df_etablissements_osm.apply(
             extraction_adresse_OSM, axis=1)
@@ -42,18 +44,17 @@ def render_tab_concurrence(df_communes, df_coefficients, gdf_socio_filtre, indic
         gdf_poi_final = gpd.GeoDataFrame()
         if poi_selectionnes_sidebar:
             bounds = gdf_etablissements_osm.total_bounds
-            marge = 0.05;
+            marge = 0.05
             bbox_poi = (bounds[0] - marge, bounds[1] - marge, bounds[2] + marge, bounds[3] + marge)
             with st.spinner("Recherche des points d'intérêt..."):
                 liste_gdf_poi = [rechercher_poi_osm(bbox_poi, POI_CONFIG[cat]['tags']).assign(categorie=cat) for cat in
                                  poi_selectionnes_sidebar]
-                # Filtrer les dataframes vides avant la concaténation
                 liste_gdf_poi_non_vides = [gdf for gdf in liste_gdf_poi if not gdf.empty]
                 if liste_gdf_poi_non_vides:
                     gdf_poi_final = pd.concat(liste_gdf_poi_non_vides, ignore_index=True)
                     st.info(f"{len(gdf_poi_final)} point(s) d'intérêt trouvé(s).")
 
-        st.markdown("---");
+        st.markdown("---")
         st.subheader("Carte Interactive")
         mode_affichage = st.radio("Mode d'affichage des concurrents :",
                                   ('Points', 'Cercles d\'influence', 'Isochrones'), horizontal=True,
@@ -78,6 +79,9 @@ def render_tab_concurrence(df_communes, df_coefficients, gdf_socio_filtre, indic
 # LOGIQUE DE L'ONGLET N°2 : ANALYSE D'UNE ZONE D'IMPLANTATION
 # =============================================================================
 def render_tab_implantation(gdf_socio_filtre, indicateur, nom_indicateur, maille, poi_selectionnes_sidebar):
+    # Le contrôle des bâtiments est maintenant local à cet onglet
+    afficher_batiments, surface_min, surface_max = interface_selection_batiments()
+
     address, lat, lon, mode, radius = interface_point_interet()
 
     final_lat, final_lon = (lat, lon)
@@ -86,7 +90,6 @@ def render_tab_implantation(gdf_socio_filtre, indicateur, nom_indicateur, maille
 
     if final_lat and final_lon:
         st.header("✔️ Résultats de l'analyse de zone")
-
         temps_isochrones = st.slider("Temps de trajet pour l'isochrone (min) :", 2, 20, 10, 1,
                                      key="temps_implantation") if mode == 'Isochrones' else 10
 
@@ -116,12 +119,23 @@ def render_tab_implantation(gdf_socio_filtre, indicateur, nom_indicateur, maille
                             gdf_poi_trouves = gdf_poi_brut[gdf_poi_brut.within(zone_analyse_geom)]
                             st.info(f"{len(gdf_poi_trouves)} point(s) d'intérêt trouvé(s) dans la zone.")
 
-        st.markdown("---");
+        gdf_batiments_final = gpd.GeoDataFrame()
+        if afficher_batiments and zone_analyse_geom:
+            bbox_batiments = zone_analyse_geom.bounds
+            gdf_batiments_brut = rechercher_batiments_osm(bbox_batiments)
+            if not gdf_batiments_brut.empty:
+                gdf_batiments_final = gdf_batiments_brut[(gdf_batiments_brut['surface_m2'] >= surface_min) & (
+                            gdf_batiments_brut['surface_m2'] <= surface_max)]
+                gdf_batiments_final = gdf_batiments_final[gdf_batiments_final.within(zone_analyse_geom)]
+                st.info(f"{len(gdf_batiments_final)} bâtiment(s) correspondant à vos critères de surface affiché(s).")
+
+        st.markdown("---")
         st.subheader("Carte Interactive de la Zone")
         map_object = creer_carte_implantation(
             lat_centre=final_lat, lon_centre=final_lon, zone_analyse_geom=zone_analyse_geom,
             gdf_poi_trouves=gdf_poi_trouves, gdf_socio=gdf_socio_filtre,
-            colonne_socio=indicateur, nom_indicateur_socio=nom_indicateur
+            colonne_socio=indicateur, nom_indicateur_socio=nom_indicateur,
+            gdf_batiments=gdf_batiments_final
         )
         st_folium(map_object, width=800, height=600, returned_objects=[])
 
@@ -138,6 +152,7 @@ def page_osm(path_communes, path_iris_socio, path_coeff_trafic):
         df_iris_base = charger_donnees_iris_socio(path_iris_socio)
 
     dict_geodatas = preparer_donnees_socio(df_iris_base, df_communes)
+
     gdf_socio_filtre, indicateur, nom_indicateur, maille = interface_selection_socio(dict_geodatas)
     poi_selectionnes_sidebar = interface_selection_poi()
 
