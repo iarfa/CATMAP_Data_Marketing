@@ -63,46 +63,67 @@ INDICATEURS_CONFIG = {
 }
 
 
-def interface_recherche_osm(df_geo):
-    """Affiche une interface complète pour la recherche OSM et gère l'état via st.session_state."""
-    st.subheader("Recherche d'établissements")
+def interface_recherche_osm(df_geo, key_prefix):
+    """
+    Affiche une interface complète pour la recherche OSM.
+    Le titre est géré par la page appelante.
+    """
     if df_geo is None or df_geo.empty:
         st.error("Données géographiques de référence non chargées.")
         return pd.DataFrame()
 
-    noms_etablissements_osm = st.text_input("Noms d'établissements (séparés par des virgules)",
-                                            placeholder="Ex: Carrefour, Lidl",
-                                            value=st.session_state.get("noms_etablissements_osm", ""))
+    noms_etablissements_osm = st.text_input(
+        "Noms d'établissements (séparés par des virgules)",
+        placeholder="Ex: Carrefour, Lidl",
+        key=f"{key_prefix}_noms_etablissements"
+    )
     noms_etablissements = [nom.strip() for nom in noms_etablissements_osm.split(",") if nom.strip()]
 
     st.markdown("Zone de recherche")
-    maille_recherche = st.radio("Maille :", ('Région', 'Département', 'Commune'), horizontal=True, key="maille_osm")
+    maille_recherche = st.radio(
+        "Maille :", ('Région', 'Département', 'Commune'),
+        horizontal=True,
+        key=f"{key_prefix}_maille_osm"
+    )
 
     selection_geo = []
     if maille_recherche == 'Région':
         regions_disponibles = sorted(df_geo['Nom_Region'].unique())
-        selection_geo = st.multiselect("Choisissez une ou plusieurs régions", regions_disponibles)
-
+        selection_geo = st.multiselect(
+            "Choisissez une ou plusieurs régions",
+            regions_disponibles,
+            key=f"{key_prefix}_regions"
+        )
     elif maille_recherche in ['Département', 'Commune']:
         df_deps = df_geo[['Num_Dep', 'Nom_Dep']].drop_duplicates()
-        options_tuples = sorted(
-            [(int(row['Num_Dep']), f"{str(row['Num_Dep']).zfill(2)} - {row['Nom_Dep']}") for _, row in
-             df_deps.iterrows() if str(row['Num_Dep']).isdigit()])
+        options_tuples = sorted([(int(row['Num_Dep']), f"{str(row['Num_Dep']).zfill(2)} - {row['Nom_Dep']}") for _, row in df_deps.iterrows() if str(row['Num_Dep']).isdigit()])
         options_deps = [label for num, label in options_tuples]
 
         if maille_recherche == 'Département':
-            selection_labels = st.multiselect("Choisissez un ou plusieurs départements", options_deps)
+            selection_labels = st.multiselect(
+                "Choisissez un ou plusieurs départements",
+                options_deps,
+                key=f"{key_prefix}_departements"
+            )
             selection_geo = [label.split(' - ')[1] for label in selection_labels]
-        else:  # Commune
+        else:
             st.info("Pour trouver une commune, veuillez d'abord sélectionner son département.")
-            dep_pour_communes_labels = st.multiselect("D'abord, sélectionnez le(s) département(s)", options_deps)
+            dep_pour_communes_labels = st.multiselect(
+                "D'abord, sélectionnez le(s) département(s)",
+                options_deps,
+                key=f"{key_prefix}_deps_pour_communes"
+            )
             if dep_pour_communes_labels:
                 deps_selectionnes = [label.split(' - ')[1] for label in dep_pour_communes_labels]
                 communes_disponibles = sorted(df_geo[df_geo['Nom_Dep'].isin(deps_selectionnes)]['Nom_Ville'].unique())
-                selection_geo = st.multiselect("Puis, choisissez une ou plusieurs communes", communes_disponibles)
+                selection_geo = st.multiselect(
+                    "Puis, choisissez une ou plusieurs communes",
+                    communes_disponibles,
+                    key=f"{key_prefix}_communes"
+                )
 
-    if st.button("Lancer la recherche", type="primary"):
-        st.session_state["noms_etablissements_osm"] = noms_etablissements_osm
+    if st.button("Lancer la recherche", type="primary", key=f"{key_prefix}_bouton_recherche"):
+        session_state_key_results = f"df_etablissements_osm_{key_prefix}"
         villes_a_chercher = []
         if selection_geo:
             if maille_recherche == 'Région':
@@ -111,16 +132,15 @@ def interface_recherche_osm(df_geo):
                 villes_a_chercher = df_geo[df_geo['Nom_Dep'].isin(selection_geo)]['Nom_Ville'].tolist()
             elif maille_recherche == 'Commune':
                 villes_a_chercher = selection_geo
-
         if noms_etablissements and villes_a_chercher:
             with st.spinner(f"Recherche en cours..."):
                 df_resultats = recherche_etablissements_osm(noms_etablissements, list(set(villes_a_chercher)))
-            st.session_state["df_etablissements_osm"] = df_resultats if df_resultats is not None else pd.DataFrame()
+            st.session_state[session_state_key_results] = df_resultats if df_resultats is not None else pd.DataFrame()
         else:
             st.warning("Veuillez entrer un nom d’établissement ET sélectionner une zone.")
-            st.session_state["df_etablissements_osm"] = pd.DataFrame()
+            st.session_state[session_state_key_results] = pd.DataFrame()
 
-    return st.session_state.get("df_etablissements_osm", pd.DataFrame())
+    return st.session_state.get(f"df_etablissements_osm_{key_prefix}", pd.DataFrame())
 
 
 def interface_selection_socio(dict_geodatas):
@@ -173,3 +193,50 @@ def interface_selection_poi():
         options=list(POI_CONFIG.keys())
     )
     return selection
+
+def interface_point_interet():
+    """
+    Affiche une interface pour définir un POI et choisir le mode d'analyse de sa zone.
+    Le titre est maintenant simplifié.
+    """
+    st.markdown("---")
+    st.subheader("Définir une zone d'implantation à analyser") # Titre simplifié
+
+    # Initialisation des variables de retour
+    poi_address, poi_lat, poi_lon = None, None, None
+    analysis_mode = 'Isochrones'
+    radius_meters = 1000
+
+    tab1, tab2 = st.tabs(["Saisir une adresse", "Saisir des coordonnées"])
+
+    with tab1:
+        poi_address = st.text_input(
+            "Adresse du point d'intérêt :",
+            placeholder="Ex: 8 Rue de Londres, 75009 Paris",
+            help="Entrez une adresse complète pour un géocodage précis.",
+            key="poi_adresse"
+        )
+
+    with tab2:
+        col1, col2 = st.columns(2)
+        with col1:
+            poi_lat = st.number_input("Latitude :", value=48.85, step=0.0001, format="%.4f", key="poi_lat")
+        with col2:
+            poi_lon = st.number_input("Longitude :", value=2.35, step=0.0001, format="%.4f", key="poi_lon")
+
+    st.markdown("**Mode d'analyse de la zone :**")
+    analysis_mode = st.radio(
+        "Mode d'analyse :",
+        ('Isochrones', "Cercle d'influence"),
+        horizontal=True,
+        key="poi_analysis_mode",
+        label_visibility="collapsed"
+    )
+
+    if analysis_mode == "Cercle d'influence":
+        radius_meters = st.slider("Rayon (m) :", 100, 5000, 1000, 100, key="poi_radius_slider")
+
+    if poi_address:
+        return poi_address, None, None, analysis_mode, radius_meters
+    else:
+        return None, poi_lat, poi_lon, analysis_mode, radius_meters
