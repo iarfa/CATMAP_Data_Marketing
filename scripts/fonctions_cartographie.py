@@ -198,30 +198,29 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                          poi_lat=None, poi_lon=None,
                          poi_analysis_mode='Isochrones', poi_radius_meters=1000):
     """
-    Version intégrale et finale : gère les modes d'analyse (cercle/isochrone) pour le POI.
+    Version simplifiée : n'affiche plus les bâtiments, uniquement les concurrents,
+    la zone d'analyse et les couches de données.
     """
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=11, tiles="OpenStreetMap")
-
     legend_enseignes, colormap, single_value_info = {}, None, None
 
-    # --- Couche Socio-économique ---
+    # --- Couche Socio-économique (INCHANGÉ) ---
     if gdf_socio is not None and not gdf_socio.empty and colonne_socio:
-        if colonne_socio not in gdf_socio.columns:
-            gdf_socio[colonne_socio] = pd.NA
+        if colonne_socio not in gdf_socio.columns: gdf_socio[colonne_socio] = pd.NA
         gdf_socio_clean = gdf_socio.dropna(subset=['geometry']).copy()
         if not gdf_socio_clean.empty:
             valeurs_non_nulles = gdf_socio_clean[colonne_socio].dropna()
             if valeurs_non_nulles.nunique() > 1:
                 min_val, max_val = valeurs_non_nulles.min(), valeurs_non_nulles.max()
-                colormap = cm.LinearColormap(colors=['#ffffcc', '#fd8d3c', '#800026'], vmin=min_val, vmax=max_val)
+                colormap = cm.LinearColormap(colors=['#ffffcc', '#fd8d3c', '#800026'], vmin=min_val, vmax=max_val);
                 colormap.caption = nom_indicateur_socio or colonne_socio
             elif valeurs_non_nulles.nunique() == 1:
                 single_value_info = {"label": nom_indicateur_socio, "value": valeurs_non_nulles.iloc[0]}
-            tooltip_col_name = f"{colonne_socio}_display"
+            tooltip_col_name = f"{colonne_socio}_display";
             gdf_socio_clean[tooltip_col_name] = gdf_socio_clean[colonne_socio].apply(
                 lambda x: "ND" if pd.isna(x) else f"{x:,.0f}".replace(",", " "))
 
-            def style_function(feature):
+            def style_function_socio(feature):
                 value = feature['properties'].get(colonne_socio)
                 if pd.isna(value): return {'fillColor': '#cccccc', 'color': '#999999', 'weight': 1, 'fillOpacity': 0.6}
                 if colormap: return {'fillColor': colormap(value), 'color': 'black', 'weight': 1, 'fillOpacity': 0.7}
@@ -233,17 +232,16 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                                                      aliases=['Zone:', f'{nom_indicateur_socio or colonne_socio}:'],
                                                      labels=True, style=(
                     "background-color: white; color: black; font-family: arial; font-size: 14px; padding: 10px;"))
-            folium.GeoJson(gdf_socio_clean, name="Données Socio-Éco", style_function=style_function,
+            folium.GeoJson(gdf_socio_clean, name="Données Socio-Éco", style_function=style_function_socio,
                            tooltip=tooltip).add_to(m)
 
-    # --- Couche Point d'Intérêt Utilisateur ---
+    # --- Couche Point d'Intérêt Utilisateur (INCHANGÉ) ---
     zone_analyse_geom = None
     if poi_lat is not None and poi_lon is not None:
         fg_poi_user = folium.FeatureGroup(name="Zone d'Analyse", show=True).add_to(m)
         folium.Marker([poi_lat, poi_lon], tooltip="Votre point d'intérêt",
                       icon=folium.Icon(icon='crosshairs', prefix='fa', color='red')).add_to(fg_poi_user)
         poi_point_gdf = gpd.GeoDataFrame(geometry=[gpd.points_from_xy([poi_lon], [poi_lat])[0]], crs="EPSG:4326")
-
         if poi_analysis_mode == 'Isochrones':
             temps_secondes = (temps_isochrones * 0.9) * 60
             feature = calculer_isochrone_et_cacher(poi_lon, poi_lat, temps_secondes)
@@ -252,27 +250,25 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                 folium.GeoJson(feature, style_function=lambda x: {'fillColor': 'red', 'color': 'red', 'weight': 2,
                                                                   'fillOpacity': 0.15},
                                tooltip=f"Zone accessible en {temps_isochrones} min").add_to(fg_poi_user)
-
         elif poi_analysis_mode == "Cercle d'influence":
-            poi_reproj = poi_point_gdf.to_crs("EPSG:3857")
+            poi_reproj = poi_point_gdf.to_crs("EPSG:3857");
             cercle_geom_reproj = poi_reproj.buffer(poi_radius_meters).iloc[0]
-            cercle_gdf_reproj = gpd.GeoDataFrame(geometry=[cercle_geom_reproj], crs="EPSG:3857")
+            cercle_gdf_reproj = gpd.GeoDataFrame(geometry=[cercle_geom_reproj], crs="EPSG:3857");
             cercle_gdf = cercle_gdf_reproj.to_crs("EPSG:4326")
             zone_analyse_geom = cercle_gdf.geometry.iloc[0]
             folium.GeoJson(cercle_gdf, style_function=lambda x: {'fillColor': 'red', 'color': 'red', 'weight': 2,
                                                                  'fillOpacity': 0.15},
                            tooltip=f"Cercle de {poi_radius_meters}m de rayon").add_to(fg_poi_user)
 
-    # --- Couche des Établissements ---
+    # --- Couche des Établissements (INCHANGÉ) ---
     if gdf_etablissements is not None and not gdf_etablissements.empty:
         fg_etablissements = folium.FeatureGroup(name="Établissements", show=True).add_to(m)
         couleurs = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33', '#a65628', '#f781bf']
         legend_enseignes = {nom: couleurs[i % len(couleurs)] for i, nom in
                             enumerate(gdf_etablissements['nom_etablissement'].unique())}
-
         if mode_affichage_etablissements == 'Isochrones':
             for _, row in gdf_etablissements.iterrows():
-                color = legend_enseignes.get(row['nom_etablissement'], 'gray')
+                color = legend_enseignes.get(row['nom_etablissement'], 'gray');
                 coeff_row = df_coefficients[df_coefficients['ville'].str.lower() == row.get('ville',
                                                                                             '').lower()] if df_coefficients is not None else pd.DataFrame()
                 coeff = coeff_row['coefficient'].iloc[0] if not coeff_row.empty else 0.9
@@ -281,13 +277,11 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                                            style_function=lambda x, c=color: {'fillColor': c, 'color': c, 'weight': 2,
                                                                               'fillOpacity': 0.25}).add_to(
                     fg_etablissements)
-
         for _, row in gdf_etablissements.iterrows():
             color = legend_enseignes.get(row['nom_etablissement'], 'gray')
             popup = folium.Popup(
                 f"<b>{row.get('nom_etablissement', 'N/A')}</b><br>{row.get('adresse_simplifiee', 'N/A')}",
                 max_width=300)
-
             tooltip_text = row['nom_etablissement'];
             border_color = color;
             border_width = 2;
@@ -297,7 +291,6 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                 border_color = 'red';
                 border_width = 4;
                 radius = 8
-
             if mode_affichage_etablissements == 'Points':
                 folium.CircleMarker([row.geometry.y, row.geometry.x], radius=radius, color=border_color,
                                     weight=border_width, fill=True, fill_color=color, fill_opacity=0.9, popup=popup,
@@ -313,12 +306,12 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                                     weight=border_width, fill=True, fill_color=color, fill_opacity=0.9, popup=popup,
                                     tooltip=tooltip_text).add_to(fg_etablissements)
 
-    # --- Couche des Points d'Intérêt (POI) Standards ---
+    # --- Couche des Points d'Intérêt (POI) Standards (INCHANGÉ) ---
     if gdf_poi is not None and not gdf_poi.empty:
         fg_poi = folium.FeatureGroup(name="Points d'Intérêt", show=True).add_to(m)
         for categorie, gdf_categorie in gdf_poi.groupby('categorie'):
-            config = POI_CONFIG.get(categorie, {})
-            icon_config = config.get('icon', {'icon': 'info-sign', 'color': 'gray', 'prefix': 'glyphicon'})
+            config = POI_CONFIG.get(categorie, {});
+            icon_config = config.get('icon', {'icon': 'info-sign', 'color': 'gray', 'prefix': 'glyphicon'});
             singular_name = config.get('singular', categorie)
             for _, poi in gdf_categorie.iterrows():
                 folium.Marker(location=[poi.geometry.y, poi.geometry.x], tooltip=f"{singular_name}: {poi['name']}",
@@ -366,25 +359,26 @@ def geocoder_adresse_nominatim(adresse):
 
 
 def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_trouves,
-                             gdf_socio=None, colonne_socio=None, nom_indicateur_socio=None):
+                             gdf_socio=None, colonne_socio=None, nom_indicateur_socio=None,
+                             gdf_batiments=None):  # Nouvel argument
     """
-    Crée une carte dédiée à l'analyse d'une zone d'implantation.
-    Affiche la zone, les POI trouvés à l'intérieur, et la couche socio-économique.
+    Crée une carte dédiée à l'analyse d'une zone d'implantation,
+    incluant maintenant la couche optionnelle des bâtiments.
     """
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=14, tiles="OpenStreetMap")
 
-    # --- Couche Socio-économique (Logique réutilisée) ---
+    # --- Couche Socio-économique (INCHANGÉ) ---
     if gdf_socio is not None and not gdf_socio.empty and colonne_socio:
         if colonne_socio not in gdf_socio.columns: gdf_socio[colonne_socio] = pd.NA
         gdf_socio_clean = gdf_socio.dropna(subset=['geometry']).copy()
         if not gdf_socio_clean.empty:
-            valeurs_non_nulles = gdf_socio_clean[colonne_socio].dropna()
+            valeurs_non_nulles = gdf_socio_clean[colonne_socio].dropna();
             colormap = None
             if valeurs_non_nulles.nunique() > 1:
                 min_val, max_val = valeurs_non_nulles.min(), valeurs_non_nulles.max()
                 colormap = cm.LinearColormap(colors=['#ffffcc', '#fd8d3c', '#800026'], vmin=min_val, vmax=max_val)
 
-            def style_function(feature):
+            def style_function_socio(feature):
                 value = feature['properties'].get(colonne_socio)
                 if pd.isna(value): return {'fillColor': '#cccccc', 'color': '#999999', 'weight': 1, 'fillOpacity': 0.6}
                 if colormap: return {'fillColor': colormap(value), 'color': 'black', 'weight': 1, 'fillOpacity': 0.7}
@@ -393,19 +387,41 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
             cle_nom = 'NOM_COM' if 'NOM_COM' in gdf_socio_clean.columns else 'NOM_DEP'
             tooltip = folium.features.GeoJsonTooltip(fields=[cle_nom, colonne_socio],
                                                      aliases=['Zone:', f'{nom_indicateur_socio or colonne_socio}:'])
-            folium.GeoJson(gdf_socio_clean, name="Données Socio-Éco", style_function=style_function,
+            folium.GeoJson(gdf_socio_clean, name="Données Socio-Éco", style_function=style_function_socio,
                            tooltip=tooltip).add_to(m)
 
-    # --- Couche de la Zone d'Analyse (Cercle ou Isochrone) ---
+    # --- Couche de la Zone d'Analyse (INCHANGÉ) ---
     if zone_analyse_geom:
         fg_zone_analyse = folium.FeatureGroup(name="Zone d'Analyse", show=True).add_to(m)
-        folium.Marker([lat_centre, lon_centre], tooltip="Point choisi",
+        folium.Marker([lat_centre, lon_centre], tooltip="Point analysé",
                       icon=folium.Icon(icon='crosshairs', prefix='fa', color='red')).add_to(fg_zone_analyse)
         zone_gdf = gpd.GeoDataFrame(geometry=[zone_analyse_geom], crs="EPSG:4326")
         folium.GeoJson(zone_gdf, style_function=lambda x: {'fillColor': 'red', 'color': 'red', 'weight': 2,
                                                            'fillOpacity': 0.15}).add_to(fg_zone_analyse)
 
-    # --- Couche des POI trouvés dans la zone ---
+    # --- NOUVEAU : Couche Bâtiments ---
+    if gdf_batiments is not None and not gdf_batiments.empty:
+        fg_batiments = folium.FeatureGroup(name="Bâtiments", show=True).add_to(m)
+
+        # Comme tous les bâtiments affichés sont pertinents, nous utilisons un style unique pour les mettre en évidence.
+        style_function_batiments = {'fillColor': '#3498db', 'color': '#2980b9', 'weight': 1.5, 'fillOpacity': 0.6}
+
+        tooltip_batiments = folium.features.GeoJsonTooltip(
+            fields=['surface_m2'],
+            aliases=['Surface :'],
+            labels=True,
+            localize=True,
+            style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;"
+        )
+
+        folium.GeoJson(
+            gdf_batiments,
+            name="Bâtiments",
+            style_function=lambda x: style_function_batiments,
+            tooltip=tooltip_batiments
+        ).add_to(fg_batiments)
+
+    # --- Couche des POI trouvés dans la zone (INCHANGÉ) ---
     if gdf_poi_trouves is not None and not gdf_poi_trouves.empty:
         fg_poi = folium.FeatureGroup(name="Points d'Intérêt trouvés", show=True).add_to(m)
         for _, poi in gdf_poi_trouves.iterrows():
@@ -421,3 +437,60 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
 
     folium.LayerControl().add_to(m)
     return m
+
+@st.cache_data(show_spinner="Recherche des bâtiments...")
+def rechercher_batiments_osm(bbox):
+    """
+    Interroge l'API Overpass pour trouver les polygones des bâtiments dans une zone,
+    et calcule leur surface en mètres carrés.
+
+    Args:
+        bbox (tuple): Bounding box (min_lon, min_lat, max_lon, max_lat).
+
+    Returns:
+        gpd.GeoDataFrame: Un GeoDataFrame contenant les polygones des bâtiments
+                          et une colonne 'surface_m2', ou un GeoDataFrame vide.
+    """
+    bbox_str = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
+    overpass_url = "http://overpass-api.de/api/interpreter"
+    overpass_query = f"""
+    [out:json][timeout:30];
+    (
+      way["building"]({bbox_str});
+    );
+    out geom;
+    """
+
+    try:
+        response = requests.get(overpass_url, params={'data': overpass_query})
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        st.warning(f"Impossible de récupérer les données des bâtiments : {e}")
+        return gpd.GeoDataFrame()
+
+    geometries = []
+    elements = data.get('elements', [])
+
+    for element in elements:
+        if element['type'] == 'way' and 'geometry' in element:
+            coords = [(node['lon'], node['lat']) for node in element['geometry']]
+            if len(coords) >= 4: # Un polygone valide a au moins 4 points
+                geometries.append(shape({'type': 'Polygon', 'coordinates': [coords]}))
+
+    if not geometries:
+        return gpd.GeoDataFrame()
+
+    # Création du GeoDataFrame initial en WGS84
+    gdf = gpd.GeoDataFrame(geometry=geometries, crs="EPSG:4326")
+
+    # Reprojection dans un système métrique pour un calcul de surface précis
+    # EPSG:2154 = RGF93 / Lambert-93, adapté pour la France métropolitaine
+    try:
+        gdf_metric = gdf.to_crs("EPSG:2154")
+        gdf['surface_m2'] = gdf_metric.area.round(1)
+    except Exception as e:
+        st.error(f"Erreur lors du calcul de la surface des bâtiments : {e}")
+        return gpd.GeoDataFrame()
+
+    return gdf

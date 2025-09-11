@@ -240,3 +240,45 @@ def interface_point_interet():
         return poi_address, None, None, analysis_mode, radius_meters
     else:
         return None, poi_lat, poi_lon, analysis_mode, radius_meters
+
+
+def interface_selection_batiments():
+    """
+    Affiche les contrôles pour l'affichage des bâtiments directement dans la page
+    (et non plus dans la sidebar), à l'intérieur d'un expander.
+    """
+    afficher_batiments = False
+    surface_min = 0
+    surface_max = 5000  # Valeur par défaut haute
+
+    with st.expander("🏙️ Afficher et filtrer les bâtiments dans la zone"):
+        afficher_batiments = st.toggle(
+            "Activer l'affichage des bâtiments",
+            help="Affiche l'emprise au sol des bâtiments présents dans la zone d'analyse définie."
+        )
+
+        if afficher_batiments:
+            st.markdown("Filtrer par surface :")
+            col1, col2 = st.columns(2)
+
+            with col1:
+                surface_min = st.number_input(
+                    "Min (m²)",
+                    min_value=0,
+                    max_value=100000,
+                    value=50,  # Valeur par défaut
+                    step=10,
+                    key="surface_min"
+                )
+
+            with col2:
+                surface_max = st.number_input(
+                    "Max (m²)",
+                    min_value=0,
+                    max_value=100000,
+                    value=500,  # Valeur par défaut
+                    step=10,
+                    key="surface_max"
+                )
+
+    return afficher_batiments, surface_min, surface_max
