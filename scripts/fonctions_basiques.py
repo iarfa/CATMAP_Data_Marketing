@@ -61,6 +61,18 @@ def charger_coefficients_trafic(path_coeff_trafic):
         st.warning(f"Fichier des coefficients de trafic introuvable : {path_coeff_trafic}. Le trafic ne sera pas simulé.")
         return pd.DataFrame(columns=['ville', 'coefficient'])
 
+@st.cache_data(show_spinner="Chargement des zones inondables...")
+def charger_zones_inondables(path_parquet):
+    """
+    Charge les données optimisées des zones inondables depuis un fichier Parquet,
+    en spécifiant explicitement le moteur de lecture.
+    """
+    try:
+        gdf = gpd.read_parquet(path_parquet)
+        return gdf
+    except Exception as e:
+        st.warning(f"Fichier des zones inondables introuvable ou illisible : {e}. La fonctionnalité sera désactivée.")
+        return gpd.GeoDataFrame()
 # ==============================================
 # Fonctions pour la page INSEE (INCHANGÉES)
 # ==============================================
@@ -228,3 +240,47 @@ def preparer_donnees_socio(_df_iris_base, _df_communes_france):
             dframe.loc[lignes_a_modifier, colonnes_presentes] = np.nan
 
     return {"IRIS": df, "Commune": df_commune, "Département": df_departement}
+
+
+# Fichier : fonctions_basiques.py
+
+# ... (gardez toutes vos autres fonctions existantes comme charger_zones_inondables, etc.)
+
+def enrichir_donnees_inondations(gdf_inondations, df_communes):
+    """
+    Enrichit le GeoDataFrame des zones inondables avec le numéro de département.
+
+    Args:
+        gdf_inondations (gpd.GeoDataFrame): Données d'inondation avec la colonne 'NOM_DEP'.
+        df_communes (pd.DataFrame): Données de référence des communes avec 'Num_Dep' et 'Nom_Dep'.
+
+    Returns:
+        gpd.GeoDataFrame: Le GeoDataFrame d'inondation enrichi avec la colonne 'Num_Dep'.
+    """
+    if 'NOM_DEP' not in gdf_inondations.columns:
+        st.warning("La colonne 'NOM_DEP' est manquante dans les données d'inondation. Impossible d'enrichir.")
+        return gdf_inondations
+
+    # 1. Préparer la table de référence : Num_Dep et Nom_Dep uniques
+    df_ref_deps = df_communes[['Num_Dep', 'Nom_Dep']].copy().drop_duplicates('Nom_Dep')
+
+    # 2. Normaliser les noms de département pour assurer une jointure fiable
+    # On met tout en majuscules et on enlève les tirets, des deux côtés.
+    df_ref_deps['join_key'] = df_ref_deps['Nom_Dep'].str.upper().str.replace('-', ' ')
+    gdf_inondations['join_key'] = gdf_inondations['NOM_DEP'].str.upper().str.replace('-', ' ')
+
+    # 3. Effectuer la jointure pour ajouter 'Num_Dep'
+    gdf_enrichi = gdf_inondations.merge(
+        df_ref_deps[['Num_Dep', 'join_key']],
+        on='join_key',
+        how='left'
+    )
+
+    # 4. Nettoyer les colonnes temporaires
+    gdf_enrichi = gdf_enrichi.drop(columns=['join_key'])
+
+    # S'assurer que le Num_Dep est bien un string formaté
+    if 'Num_Dep' in gdf_enrichi.columns:
+        gdf_enrichi['Num_Dep'] = gdf_enrichi['Num_Dep'].astype(str).str.zfill(2)
+
+    return gdf_enrichi
