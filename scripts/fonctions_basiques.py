@@ -73,6 +73,19 @@ def charger_zones_inondables(path_parquet):
     except Exception as e:
         st.warning(f"Fichier des zones inondables introuvable ou illisible : {e}. La fonctionnalité sera désactivée.")
         return gpd.GeoDataFrame()
+
+@st.cache_data(show_spinner="Chargement des données de sécheresse (RGA)...")
+def charger_donnees_rga(path_parquet):
+    """
+    Charge les données optimisées sur le risque de sécheresse (RGA) depuis un fichier Parquet.
+    """
+    try:
+        gdf = gpd.read_parquet(path_parquet)
+        return gdf
+    except Exception as e:
+        st.warning(f"Fichier des données RGA introuvable ou illisible : {e}. La fonctionnalité sera désactivée.")
+        return gpd.GeoDataFrame()
+
 # ==============================================
 # Fonctions pour la page INSEE (INCHANGÉES)
 # ==============================================
@@ -242,24 +255,25 @@ def preparer_donnees_socio(_df_iris_base, _df_communes_france):
     return {"IRIS": df, "Commune": df_commune, "Département": df_departement}
 
 
-# Fichier : fonctions_basiques.py
 
-# ... (gardez toutes vos autres fonctions existantes comme charger_zones_inondables, etc.)
-
-def enrichir_donnees_inondations(gdf_inondations, df_communes):
+def enrichir_donnees_risques_avec_num_dep(gdf_risques, df_communes):
     """
-    Enrichit le GeoDataFrame des zones inondables avec le numéro de département.
+    Enrichit un GeoDataFrame de risques (inondation, RGA, etc.) avec le numéro de département.
+    La jointure est faite sur le nom du département, en normalisant le texte pour plus de robustesse.
 
     Args:
-        gdf_inondations (gpd.GeoDataFrame): Données d'inondation avec la colonne 'NOM_DEP'.
+        gdf_risques (gpd.GeoDataFrame): Données de risque avec la colonne 'NOM_DEP'.
         df_communes (pd.DataFrame): Données de référence des communes avec 'Num_Dep' et 'Nom_Dep'.
 
     Returns:
-        gpd.GeoDataFrame: Le GeoDataFrame d'inondation enrichi avec la colonne 'Num_Dep'.
+        gpd.GeoDataFrame: Le GeoDataFrame de risque enrichi avec la colonne 'Num_Dep'.
     """
-    if 'NOM_DEP' not in gdf_inondations.columns:
-        st.warning("La colonne 'NOM_DEP' est manquante dans les données d'inondation. Impossible d'enrichir.")
-        return gdf_inondations
+    # Vérification de la présence des colonnes nécessaires
+    if 'NOM_DEP' not in gdf_risques.columns:
+        st.warning("La colonne 'NOM_DEP' est manquante dans les données de risque. Impossible d'enrichir.")
+        return gdf_risques
+    if gdf_risques.empty:
+        return gdf_risques
 
     # 1. Préparer la table de référence : Num_Dep et Nom_Dep uniques
     df_ref_deps = df_communes[['Num_Dep', 'Nom_Dep']].copy().drop_duplicates('Nom_Dep')
@@ -267,10 +281,10 @@ def enrichir_donnees_inondations(gdf_inondations, df_communes):
     # 2. Normaliser les noms de département pour assurer une jointure fiable
     # On met tout en majuscules et on enlève les tirets, des deux côtés.
     df_ref_deps['join_key'] = df_ref_deps['Nom_Dep'].str.upper().str.replace('-', ' ')
-    gdf_inondations['join_key'] = gdf_inondations['NOM_DEP'].str.upper().str.replace('-', ' ')
+    gdf_risques['join_key'] = gdf_risques['NOM_DEP'].str.upper().str.replace('-', ' ')
 
     # 3. Effectuer la jointure pour ajouter 'Num_Dep'
-    gdf_enrichi = gdf_inondations.merge(
+    gdf_enrichi = gdf_risques.merge(
         df_ref_deps[['Num_Dep', 'join_key']],
         on='join_key',
         how='left'

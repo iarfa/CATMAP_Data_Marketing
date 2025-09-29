@@ -192,14 +192,14 @@ def rechercher_poi_osm(bounding_box, tags_a_chercher):
 
 def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                          gdf_socio=None, colonne_socio=None, nom_indicateur_socio=None,
-                         gdf_poi=None, gdf_batiments=None, gdf_inondations=None,
+                         gdf_poi=None, gdf_batiments=None, gdf_inondations=None, gdf_rga=None,
                          mode_affichage_etablissements='Points', rayon_cercles=1000, temps_isochrones=10,
                          df_coefficients=None,
                          poi_lat=None, poi_lon=None,
                          poi_analysis_mode='Isochrones', poi_radius_meters=1000):
     """
-    Version intégrale : Crée une carte pour l'onglet "Analyse de la concurrence",
-    en incluant toutes les couches optionnelles (socio, POI, inondations).
+    Crée une carte complète en incluant toutes les couches optionnelles
+    (socio, POI, risques, bâtiments, établissements).
     """
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=11, tiles="OpenStreetMap")
     legend_enseignes, colormap, single_value_info = {}, None, None
@@ -235,7 +235,7 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
             folium.GeoJson(gdf_socio_clean, name="Données Socio-Éco", style_function=style_function_socio,
                            tooltip=tooltip).add_to(m)
 
-    # --- Couche Risque Inondation (MODIFIÉ) ---
+    # --- Couche Risque Inondation ---
     if gdf_inondations is not None and not gdf_inondations.empty:
         fg_inondations = folium.FeatureGroup(name=f"Risque Inondation ({len(gdf_inondations)} zones)",
                                              show=True).add_to(m)
@@ -244,24 +244,25 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
 
         def style_function_inondation(feature):
             aléa = feature['properties'].get('NIVEAU_ALEA', 'Non spécifié')
-            return {
-                'fillColor': color_map.get(aléa, '#808080'),
-                'color': 'black',
-                'weight': 0.5,
-                'fillOpacity': 0.5
-            }
+            return {'fillColor': color_map.get(aléa, '#808080'), 'color': 'black', 'weight': 0.5, 'fillOpacity': 0.5}
 
-        # MODIFIÉ : L'infobulle est simplifiée pour n'afficher que le niveau d'aléa.
-        tooltip_inondation = folium.features.GeoJsonTooltip(
-            fields=['NIVEAU_ALEA'],
-            aliases=['Niveau de risque:']
-        )
+        tooltip_inondation = folium.features.GeoJsonTooltip(fields=['NIVEAU_ALEA'], aliases=['Niveau de risque:'])
+        folium.GeoJson(gdf_inondations, style_function=style_function_inondation, tooltip=tooltip_inondation).add_to(
+            fg_inondations)
 
-        folium.GeoJson(
-            gdf_inondations,
-            style_function=style_function_inondation,
-            tooltip=tooltip_inondation
-        ).add_to(fg_inondations)
+    # --- Couche Risque Sécheresse (RGA) ---
+    if gdf_rga is not None and not gdf_rga.empty:
+        fg_rga = folium.FeatureGroup(name=f"Risque Sécheresse ({len(gdf_rga)} zones)", show=True).add_to(m)
+        color_map_rga = {'aléa fort': '#d95f02', 'aléa moyen': '#fd8d3c', 'aléa faible': '#fee6ce',
+                         'non spécifié': '#bdbdbd'}
+
+        def style_function_rga(feature):
+            aléa = feature['properties'].get('NIVEAU_ALEA', 'non spécifié').lower()
+            return {'fillColor': color_map_rga.get(aléa, '#bdbdbd'), 'color': 'black', 'weight': 0.5,
+                    'fillOpacity': 0.5}
+
+        tooltip_rga = folium.features.GeoJsonTooltip(fields=['NIVEAU_ALEA'], aliases=['Niveau de risque:'])
+        folium.GeoJson(gdf_rga, style_function=style_function_rga, tooltip=tooltip_rga).add_to(fg_rga)
 
     # --- Couche Point d'Intérêt Utilisateur ---
     zone_analyse_geom = None
@@ -305,7 +306,7 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
         folium.GeoJson(gdf_batiments, name="Bâtiments", style_function=style_function_batiments,
                        tooltip=tooltip_batiments).add_to(fg_batiments)
 
-    # --- Couche des Établissements (MODIFIÉ) ---
+    # --- Couche des Établissements ---
     if gdf_etablissements is not None and not gdf_etablissements.empty:
         fg_etablissements = folium.FeatureGroup(name="Établissements", show=True).add_to(m)
         couleurs = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33', '#a65628', '#f781bf']
@@ -325,7 +326,6 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
         for _, row in gdf_etablissements.iterrows():
             color = legend_enseignes.get(row['nom_etablissement'], 'gray');
 
-            # MODIFIÉ : Le contenu du popup inclut maintenant la précision de géocodage.
             popup_html = f"""
             <b>Nom :</b> {row.get('nom_etablissement', 'N/A')}<br>
             <b>Adresse :</b> {row.get('adresse_simplifiee', 'N/A')}<br>
@@ -411,10 +411,10 @@ def geocoder_adresse_nominatim(adresse):
 
 def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_trouves,
                              gdf_socio=None, colonne_socio=None, nom_indicateur_socio=None,
-                             gdf_batiments=None, gdf_inondations=None):
+                             gdf_batiments=None, gdf_inondations=None, gdf_rga=None):
     """
     Version intégrale : Crée une carte pour l'onglet "Analyse d'implantation",
-    en incluant toutes les couches optionnelles (socio, POI, bâtiments, inondations).
+    en incluant toutes les couches optionnelles (socio, POI, bâtiments, inondations, rga).
     """
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=14, tiles="OpenStreetMap")
     colormap, single_value_info = None, None
@@ -465,6 +465,20 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
                        tooltip=folium.features.GeoJsonTooltip(fields=['NIVEAU_ALEA'],
                                                               aliases=['Niveau de risque :'])).add_to(fg_inondations)
 
+    # --- Couche Risque Sécheresse (RGA) ---
+    if gdf_rga is not None and not gdf_rga.empty:
+        fg_rga = folium.FeatureGroup(name=f"Risque Sécheresse ({len(gdf_rga)} zones)", show=True).add_to(m)
+        color_map_rga = {'aléa fort': '#d95f02', 'aléa moyen': '#fd8d3c', 'aléa faible': '#fee6ce',
+                         'non spécifié': '#bdbdbd'}
+
+        def style_function_rga(feature):
+            aléa = feature['properties'].get('NIVEAU_ALEA', 'non spécifié').lower()
+            return {'fillColor': color_map_rga.get(aléa, '#bdbdbd'), 'color': 'black', 'weight': 0.5,
+                    'fillOpacity': 0.5}
+
+        tooltip_rga = folium.features.GeoJsonTooltip(fields=['NIVEAU_ALEA'], aliases=['Niveau de risque:'])
+        folium.GeoJson(gdf_rga, style_function=style_function_rga, tooltip=tooltip_rga).add_to(fg_rga)
+
     # --- Couche de la Zone d'Analyse ---
     if zone_analyse_geom:
         fg_zone_analyse = folium.FeatureGroup(name="Zone d'Analyse", show=True).add_to(m)
@@ -478,11 +492,32 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
     if gdf_batiments is not None and not gdf_batiments.empty:
         fg_batiments = folium.FeatureGroup(name="Bâtiments", show=True).add_to(m)
         style_function_batiments = {'fillColor': '#3498db', 'color': '#2980b9', 'weight': 1.5, 'fillOpacity': 0.6}
-        tooltip_batiments = folium.features.GeoJsonTooltip(fields=['surface_m2'], aliases=['Surface :'], labels=True,
-                                                           localize=True,
-                                                           style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;")
-        folium.GeoJson(gdf_batiments, name="Bâtiments", style_function=lambda x: style_function_batiments,
-                       tooltip=tooltip_batiments).add_to(fg_batiments)
+
+        # Tooltip au survol (déjà présent)
+        tooltip_batiments = folium.features.GeoJsonTooltip(
+            fields=['surface_m2'],
+            aliases=['Surface (m²):'],
+            labels=True,
+            localize=True,
+            style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;"
+        )
+
+        # Popup au clic (AJOUT)
+        popup_batiments = folium.features.GeoJsonPopup(
+            fields=['surface_m2'],
+            aliases=['Surface (m²):'],
+            labels=True,
+            localize=True,
+            style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;"
+        )
+
+        folium.GeoJson(
+            gdf_batiments,
+            name="Bâtiments",
+            style_function=lambda x: style_function_batiments,
+            tooltip=tooltip_batiments,
+            popup=popup_batiments  # Ajout du popup
+        ).add_to(fg_batiments)
 
     # --- Couche des POI trouvés dans la zone ---
     if gdf_poi_trouves is not None and not gdf_poi_trouves.empty:
@@ -501,11 +536,13 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
     folium.LayerControl().add_to(m)
     return m, colormap, single_value_info
 
+
 @st.cache_data(show_spinner="Recherche des bâtiments...")
 def rechercher_batiments_osm(bbox):
     """
     Interroge l'API Overpass pour trouver les polygones des bâtiments dans une zone,
     et calcule leur surface en mètres carrés.
+    Inclut un timeout plus long et une vérification de la taille de la zone.
 
     Args:
         bbox (tuple): Bounding box (min_lon, min_lat, max_lon, max_lat).
@@ -514,10 +551,26 @@ def rechercher_batiments_osm(bbox):
         gpd.GeoDataFrame: Un GeoDataFrame contenant les polygones des bâtiments
                           et une colonne 'surface_m2', ou un GeoDataFrame vide.
     """
+    # Étape de prévention : Vérifier la taille de la Bbox
+    # On crée un polygone à partir de la bbox pour calculer sa superficie approximative
+    try:
+        bbox_poly = box(*bbox)
+        gdf_bbox = gpd.GeoDataFrame([1], geometry=[bbox_poly], crs="EPSG:4326")
+        area_km2 = gdf_bbox.to_crs("EPSG:3857").area[0] / 1_000_000
+        # Si la zone est très grande (ex: > 50 km²), on avertit l'utilisateur
+        if area_km2 > 50:
+            st.warning(
+                f"⚠️ La zone d'analyse est très grande ({area_km2:.0f} km²). La recherche des bâtiments peut être longue ou échouer. Essayez de réduire le temps de trajet ou le rayon.")
+    except Exception:
+        # En cas d'erreur sur le calcul de la zone, on continue sans bloquer
+        pass
+
     bbox_str = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
     overpass_url = "http://overpass-api.de/api/interpreter"
+
+    # On augmente le timeout de 30s à 90s pour les requêtes complexes
     overpass_query = f"""
-    [out:json][timeout:30];
+    [out:json][timeout:90];
     (
       way["building"]({bbox_str});
     );
@@ -529,6 +582,7 @@ def rechercher_batiments_osm(bbox):
         response.raise_for_status()
         data = response.json()
     except requests.exceptions.RequestException as e:
+        # On affiche l'erreur de manière plus visible dans l'application
         st.warning(f"Impossible de récupérer les données des bâtiments : {e}")
         return gpd.GeoDataFrame()
 
@@ -538,18 +592,16 @@ def rechercher_batiments_osm(bbox):
     for element in elements:
         if element['type'] == 'way' and 'geometry' in element:
             coords = [(node['lon'], node['lat']) for node in element['geometry']]
-            if len(coords) >= 4: # Un polygone valide a au moins 4 points
+            if len(coords) >= 4:  # Un polygone valide a au moins 4 points
                 geometries.append(shape({'type': 'Polygon', 'coordinates': [coords]}))
 
     if not geometries:
         return gpd.GeoDataFrame()
 
-    # Création du GeoDataFrame initial en WGS84
     gdf = gpd.GeoDataFrame(geometry=geometries, crs="EPSG:4326")
 
-    # Reprojection dans un système métrique pour un calcul de surface précis
-    # EPSG:2154 = RGF93 / Lambert-93, adapté pour la France métropolitaine
     try:
+        # Reprojection en Lambert-93 pour un calcul de surface précis en France
         gdf_metric = gdf.to_crs("EPSG:2154")
         gdf['surface_m2'] = gdf_metric.area.round(1)
     except Exception as e:
