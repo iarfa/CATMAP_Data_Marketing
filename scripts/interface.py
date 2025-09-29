@@ -284,14 +284,13 @@ def interface_selection_batiments():
     return afficher_batiments, surface_min, surface_max
 
 
-# Fichier : interface.py
-
 def interface_selection_risques(df_communes):
     """
     Affiche les contrôles pour les risques et retourne la sélection complète de l'utilisateur
     au format "Num_Dep - NOM_DEP".
     """
     st.sidebar.subheader("🌍 Données Climatiques")
+
     afficher_risques = st.sidebar.toggle("Enrichir avec les données climatiques")
 
     risque_selectionne = None
@@ -299,15 +298,27 @@ def interface_selection_risques(df_communes):
     departements_filtres = []
 
     if afficher_risques:
-        liste_risques = ["Inondations"]
-        risque_selectionne = st.sidebar.selectbox("Choisir un type de risque :", options=liste_risques)
-        filtre_geo = st.sidebar.radio("Filtrer par :", options=["Région", "Département"], horizontal=True,
-                                      key="filtre_geo_risque")
+        # MODIFIÉ : Ajout de l'option "Sécheresse (RGA)"
+        liste_risques = ["Inondations", "Sécheresse (RGA)"]
+        risque_selectionne = st.sidebar.selectbox(
+            "Choisir un type de risque :",
+            options=liste_risques
+        )
+
+        filtre_geo = st.sidebar.radio(
+            "Filtrer par :",
+            options=["Région", "Département"],
+            horizontal=True,
+            key="filtre_geo_risque"
+        )
 
         if filtre_geo == "Région":
             regions_disponibles = sorted(df_communes['Nom_Region'].unique())
-            regions_filtrees = st.sidebar.multiselect("Choisir une ou plusieurs régions :", options=regions_disponibles,
-                                                      key="filtre_risque_regions")
+            regions_filtrees = st.sidebar.multiselect(
+                "Choisir une ou plusieurs régions :",
+                options=regions_disponibles,
+                key="filtre_risque_regions"
+            )
 
         elif filtre_geo == "Département":
             df_deps = df_communes[['Num_Dep', 'Nom_Dep']].copy().dropna().drop_duplicates('Num_Dep')
@@ -315,7 +326,6 @@ def interface_selection_risques(df_communes):
             df_deps['Nom_Dep_Upper'] = df_deps['Nom_Dep'].str.upper().str.replace('-', ' ')
             df_deps = df_deps.sort_values('Num_Dep')
 
-            # On crée la colonne 'affichage_dep'
             df_deps['affichage_dep'] = df_deps['Num_Dep'] + " - " + df_deps['Nom_Dep_Upper']
             options_deps = df_deps['affichage_dep'].tolist()
 
