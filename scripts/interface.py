@@ -11,7 +11,6 @@ def personnalisation_page():
         """<style>.title {color: #1f77b4; font-size: 40px; font-weight: bold;} .header {color: #ff7f0e; font-size: 30px; font-weight: bold;} .subheader {color: #2ca02c; font-size: 20px;} .footer {color: #1f77b4; font-size: 18px;}</style>""",
         unsafe_allow_html=True)
 
-
 def affichage_titre():
     st.title("🌍 API étude sectorielle et concurrentielle Data Marketing")
     st.markdown(
@@ -19,16 +18,132 @@ def affichage_titre():
         unsafe_allow_html=True)
     st.write("Bienvenue dans l'outil de Data Marketing. Choisissez une page dans le menu à gauche pour commencer.")
 
-
 def navigation():
+    """
+    Affiche la barre de navigation latérale et retourne la page sélectionnée.
+    Version simplifiée sans la page INSEE.
+    """
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        page_selectionnee = st.radio("Choisissez une page :", ("🏠 Accueil", "📊 Données INSEE", "🗺️ Données OSM"),
-                                     index=0)
-    if "Accueil" in page_selectionnee: return "accueil"
-    if "INSEE" in page_selectionnee: return "insee"
-    if "OSM" in page_selectionnee: return "osm"
+        # On a maintenant que deux choix, Accueil et la page d'analyse
+        page_selectionnee = st.radio(
+            "Choisissez une page :",
+            ("🏠 Accueil", "🗺️ Analyse Géospatiale"),  # MODIFIÉ : "Données INSEE" supprimé, "Données OSM" renommé
+            index=0
+        )
 
+    if "Accueil" in page_selectionnee:
+        return "accueil"
+    # if "INSEE" in page_selectionnee: return "insee"
+    if "Analyse" in page_selectionnee:  # MODIFIÉ : On détecte la nouvelle page
+        return "osm"  # On retourne toujours "osm" pour la compatibilité avec main.py
+
+# ==============================================
+# Fonctions pour la page INSEE
+# ==============================================
+
+def interface_apercu_donnees(data, nb_lignes):
+    """
+    Affiche le titre, le DataFrame d'aperçu et le résumé des dimensions.
+    """
+    st.markdown("<hr style='border:2px solid #ff7f0e;'>", unsafe_allow_html=True)
+    st.header("📝 Aperçu des données")
+    st.dataframe(data.head(nb_lignes))
+    st.write(f"La table INSEE contient {data.shape[0]} lignes et {data.shape[1]} colonnes")
+
+def interface_filtres_insee(data):
+    """
+    Affiche les widgets de filtrage pour les données INSEE (catégories, villes).
+
+    Args:
+        data (pd.DataFrame): Le DataFrame complet des établissements.
+
+    Returns:
+        tuple: Un tuple contenant les listes des choix de l'utilisateur
+               (choix_categories, choix_villes).
+    """
+    st.markdown("## 🎯 Filtrage des données")
+
+    # Prépare les listes pour les filtres en s'assurant qu'il n'y a pas de doublons et qu'elles sont triées
+    liste_categories = sorted(list(data["Intitules_NAF_VF"].dropna().unique()))
+    choix_categories = st.multiselect("Choisissez une ou plusieurs catégorie(s)", liste_categories)
+
+    liste_villes = sorted(list(data["libelleCommuneEtablissement"].dropna().unique()))
+    choix_villes = st.multiselect("Choisissez une ou plusieurs ville(s)", liste_villes)
+
+    return choix_categories, choix_villes
+
+def interface_choix_departement_insee(data, centres_departements):
+    """
+    Affiche le widget pour choisir le département qui centrera la carte.
+
+    Args:
+        data (pd.DataFrame): Le DataFrame (potentiellement filtré) des établissements.
+        centres_departements (pd.DataFrame): Le DataFrame de référence des centres de départements.
+
+    Returns:
+        tuple: Un tuple (nom_departement, latitude_centre, longitude_centre).
+               Retourne (None, None, None) si aucun département ne peut être déterminé.
+    """
+    st.markdown("## 🗺️ Choix du centre de la carte")
+
+    # Extrait la liste des départements uniques des données affichées
+    liste_deps = sorted(data["nom_dep"].dropna().unique())
+
+    if not liste_deps:
+        st.info("Aucun département à afficher. Veuillez ajuster vos filtres.")
+        return None, None, None
+
+    choix_dep = st.selectbox("Choisissez le département au centre de la carte", liste_deps)
+
+    if not choix_dep:
+        return None, None, None
+
+    # Récupère les coordonnées du centre du département choisi
+    centre = centres_departements[centres_departements["Departement"] == choix_dep]
+
+    if centre.empty:
+        st.warning(f"Impossible de trouver les coordonnées pour le département {choix_dep}.")
+        return choix_dep, None, None
+
+    lat_centre = centre["Latitude_centre"].iloc[0]
+    lon_centre = centre["Longitude_centre"].iloc[0]
+
+    st.success(f"Carte centrée sur le département : {choix_dep}")
+    return choix_dep, lat_centre, lon_centre
+
+def interface_choix_affichage_insee():
+    """
+    Affiche les contrôles pour choisir le type de visualisation sur la carte INSEE
+    (Points, Cercles, Isochrones) et les paramètres associés (rayon, temps).
+
+    Returns:
+        tuple: Un tuple (mode_affichage, rayon_m, temps_min).
+               rayon_m ou temps_min peuvent être None selon le mode.
+    """
+    st.subheader("Choisissez un type d'affichage pour la carte :")
+
+    # Utilisation de st.radio pour un choix unique et plus simple
+    modes = ["Points", "Cercles", "Isochrones"]
+    mode_selectionne = st.radio(
+        "Type d'affichage :",
+        modes,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="affichage_mode_insee"
+    )
+
+    rayon_cercles = None
+    temps_isochrones = None
+
+    if mode_selectionne == "Cercles":
+        rayon_cercles = st.slider("Rayon d'influence (m)", 50, 2000, 200, 50, key="slider_insee_cercles")
+    elif mode_selectionne == "Isochrones":
+        temps_isochrones = st.slider("Temps de trajet (min)", 5, 30, 15, 5, key="slider_isochrones_insee")
+        # Pour l'instant, cette option n'est pas implémentée, on affiche un message
+        st.info("La fonctionnalité d'isochrones pour les données INSEE sera implémentée prochainement.")
+
+    return mode_selectionne, rayon_cercles, temps_isochrones
 
 # ==============================================
 # Fonctions pour la page OSM (Corrigées et améliorées)
@@ -61,7 +176,6 @@ INDICATEURS_CONFIG = {
     "autres": {"display": "Ménages - Autres sans act. pro. (CSP8)", "raw": "Menages_autres_sans_act_pro_CS8",
                "pct": "Part_autres_CS8_pct"}
 }
-
 
 def interface_recherche_osm(df_geo, key_prefix):
     """
@@ -142,7 +256,6 @@ def interface_recherche_osm(df_geo, key_prefix):
 
     return st.session_state.get(f"df_etablissements_osm_{key_prefix}", pd.DataFrame())
 
-
 def interface_selection_socio(dict_geodatas):
     """Affiche l'interface de sélection socio-économique et retourne les données filtrées."""
     gdf_socio_filtre, colonne_a_afficher, nom_indicateur_final, maille_choisie = None, None, None, None
@@ -158,7 +271,7 @@ def interface_selection_socio(dict_geodatas):
             if type_affichage == "Pourcentage (%)":
                 colonne_a_afficher, nom_indicateur_final = config_choisie['pct'], f"{config_choisie['display']} (%)"
 
-        maille_disponible = ['IRIS', 'Commune', 'Département']
+        maille_disponible = ['Département','Commune','IRIS']
         maille_choisie = st.sidebar.radio("Niveau d'analyse :", maille_disponible, index=1, horizontal=True)
         gdf_a_afficher = dict_geodatas.get(maille_choisie)
 
@@ -179,8 +292,6 @@ def interface_selection_socio(dict_geodatas):
             st.sidebar.error(f"Données non disponibles pour la maille {maille_choisie}")
 
     return gdf_socio_filtre, colonne_a_afficher, nom_indicateur_final, maille_choisie
-
-
 
 def interface_selection_poi():
     """
@@ -241,7 +352,6 @@ def interface_point_interet():
     else:
         return None, poi_lat, poi_lon, analysis_mode, radius_meters
 
-
 def interface_selection_batiments():
     """
     Affiche les contrôles pour l'affichage des bâtiments directement dans la page
@@ -266,7 +376,7 @@ def interface_selection_batiments():
                     "Min (m²)",
                     min_value=0,
                     max_value=100000,
-                    value=50,  # Valeur par défaut
+                    value=100,  # Valeur par défaut
                     step=10,
                     key="surface_min"
                 )
@@ -276,13 +386,12 @@ def interface_selection_batiments():
                     "Max (m²)",
                     min_value=0,
                     max_value=100000,
-                    value=500,  # Valeur par défaut
+                    value=120,  # Valeur par défaut
                     step=10,
                     key="surface_max"
                 )
 
     return afficher_batiments, surface_min, surface_max
-
 
 def interface_selection_risques(df_communes):
     """

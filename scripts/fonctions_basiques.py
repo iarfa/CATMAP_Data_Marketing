@@ -90,34 +90,33 @@ def charger_donnees_rga(path_parquet):
 # Fonctions pour la page INSEE (INCHANGÉES)
 # ==============================================
 
-def apercu_donnees(data, nb_lignes):
-    st.markdown("<hr style='border:2px solid #ff7f0e;'>", unsafe_allow_html=True)
-    st.header("📝 Aperçu des données")
-    st.dataframe(data.head(nb_lignes))
-    st.write(f"La table INSEE contient {data.shape[0]} lignes et {data.shape[1]} colonnes")
+def filtrer_donnees(data, categories, villes):
+    """
+    Filtre le DataFrame des établissements en fonction des catégories et des villes sélectionnées.
 
-def filtrer_donnees(data):
-    st.markdown("## 🎯 Filtrage des données")
-    liste_categories = sorted(list(data["Intitules_NAF_VF"].dropna().unique()))
-    choix_categories = st.multiselect("Choisissez une ou plusieurs catégorie(s)", liste_categories)
-    liste_villes = sorted(list(data["libelleCommuneEtablissement"].dropna().unique()))
-    choix_villes = st.multiselect("Choisissez une ou plusieurs ville(s)", liste_villes)
-    data_filtree = data[
-        (data["Intitules_NAF_VF"].isin(choix_categories))
-        & (data["libelleCommuneEtablissement"].isin(choix_villes))
-    ].reset_index(drop=True)
+    Args:
+        data (pd.DataFrame): Le DataFrame source.
+        categories (list): La liste des catégories (Intitules_NAF_VF) à conserver.
+        villes (list): La liste des villes (libelleCommuneEtablissement) à conserver.
+
+    Returns:
+        pd.DataFrame: Le DataFrame filtré.
+    """
+    # Si les listes de filtres sont fournies mais vides, cela signifie que l'utilisateur n'a rien sélectionné
+    # et qu'on ne doit rien afficher. Si les listes ne sont pas fournies (None), on n'applique pas de filtre.
+    if categories is not None and not categories:
+        return pd.DataFrame(columns=data.columns)
+    if villes is not None and not villes:
+        return pd.DataFrame(columns=data.columns)
+
+    # Crée des conditions de filtrage dynamiques
+    condition_categorie = data["Intitules_NAF_VF"].isin(categories) if categories else pd.Series(True, index=data.index)
+    condition_ville = data["libelleCommuneEtablissement"].isin(villes) if villes else pd.Series(True, index=data.index)
+
+    # Applique les filtres et réinitialise l'index
+    data_filtree = data[condition_categorie & condition_ville].reset_index(drop=True)
+
     return data_filtree
-
-def choix_centre_departement(data, centres_departements):
-    liste_deps = sorted(data["nom_dep"].dropna().unique())
-    choix_dep = st.selectbox("Choisissez le département au centre de la carte", liste_deps)
-    centre = centres_departements[centres_departements["Departement"] == choix_dep]
-    if centre.empty:
-        return None, None, None
-    lat_centre = centre["Latitude_centre"].iloc[0]
-    lon_centre = centre["Longitude_centre"].iloc[0]
-    st.success(f"Centré sur {choix_dep} (lat: {lat_centre}, lon: {lon_centre})")
-    return choix_dep, lat_centre, lon_centre
 
 # ==============================================
 # Fonctions pour la page OSM (OPTIMISÉES)

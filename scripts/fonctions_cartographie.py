@@ -7,7 +7,7 @@ import streamlit as st
 import branca.colormap as cm
 from streamlit_folium import st_folium
 from config import POI_CONFIG
-from shapely.geometry import shape
+from shapely.geometry import shape, box
 
 
 # ==============================================
@@ -18,60 +18,76 @@ def transfo_geodataframe(df, longitude_col, latitude_col, crs="EPSG:4326"):
 
 
 # =================================================================
-# Section des fonctions pour la page INSEE (CONSERVÉES POUR COMPATIBILITÉ)
+# Section des fonctions pour la page INSEE
 # =================================================================
-def affichage_carte_points(data, lat_centre, lon_centre):
-    if lat_centre is None or lon_centre is None or data.empty: return
-    carte = folium.Map(location=[lat_centre, lon_centre], zoom_start=12)
+
+def creer_carte_insee(data, lat_centre, lon_centre, mode_affichage='Points', rayon_m=None, temps_min=None):
+    """
+    Crée et retourne une carte Folium pour les données INSEE.
+
+    Args:
+        data (pd.DataFrame): Le DataFrame des établissements à afficher.
+        lat_centre (float): Latitude du centre de la carte.
+        lon_centre (float): Longitude du centre de la carte.
+        mode_affichage (str): 'Points', 'Cercles' ou 'Isochrones'.
+        rayon_m (int, optional): Rayon en mètres pour le mode 'Cercles'.
+        temps_min (int, optional): Temps en minutes pour le mode 'Isochrones'.
+
+    Returns:
+        folium.Map: L'objet carte Folium prêt à être affiché.
+    """
+    # Vérification des prérequis pour créer la carte
+    if lat_centre is None or lon_centre is None:
+        # Pas de st.warning ici car ce fichier ne doit pas dépendre de streamlit
+        print("Avertissement : Coordonnées du centre de la carte non définies.")
+        return None
+
+    carte = folium.Map(location=[lat_centre, lon_centre], zoom_start=11)
+
+    if data.empty:
+        # Affiche une carte vide centrée si pas de données
+        return carte
+
+    # Itération sur les données pour ajouter les marqueurs
     for _, ligne in data.iterrows():
+        # S'assurer que les coordonnées existent pour la ligne actuelle
         if pd.notna(ligne.get('latitude')) and pd.notna(ligne.get('longitude')):
-            folium.CircleMarker(location=[ligne['latitude'], ligne['longitude']], radius=7, color='blue', fill=True,
-                                fill_color='blue').add_to(carte)
-    st_folium(carte, width=800, height=600)
+            lat, lon = ligne['latitude'], ligne['longitude']
 
+            if mode_affichage == 'Points':
+                folium.CircleMarker(
+                    location=[lat, lon],
+                    radius=5,
+                    color='blue',
+                    fill=True,
+                    fill_color='blue'
+                ).add_to(carte)
 
-def affichage_carte_cercles(data, lat_centre, lon_centre):
-    if lat_centre is None or lon_centre is None or data.empty: return
-    carte = folium.Map(location=[lat_centre, lon_centre], zoom_start=12)
-    rayon_influence = st.slider("Rayon d'influence (m)", 50, 2000, 200, 50, key="slider_insee_cercles")
-    for _, ligne in data.iterrows():
-        if pd.notna(ligne.get('latitude')) and pd.notna(ligne.get('longitude')):
-            folium.Circle(location=[ligne['latitude'], ligne['longitude']], radius=rayon_influence, color='red',
-                          fill=True, fill_color='red').add_to(carte)
-    st_folium(carte, width=800, height=600)
+            elif mode_affichage == 'Cercles' and rayon_m is not None:
+                folium.Circle(
+                    location=[lat, lon],
+                    radius=rayon_m,
+                    color='red',
+                    fill=True,
+                    fill_color='red',
+                    fill_opacity=0.3
+                ).add_to(carte)
+                # Ajoute aussi le point central pour une meilleure visibilité
+                folium.CircleMarker(location=[lat, lon], radius=2, color='darkred').add_to(carte)
 
+            elif mode_affichage == 'Isochrones' and temps_min is not None:
+                # La logique de calcul d'isochrone n'est pas encore connectée ici.
+                # On met un placeholder pour le moment.
+                folium.Marker(
+                    location=[lat, lon],
+                    tooltip=f"Isochrone de {temps_min} min à calculer",
+                    icon=folium.Icon(icon='clock-o', prefix='fa', color='purple')
+                ).add_to(carte)
 
-def affichage_isochrones_insee(data, lat_centre, lon_centre):
-    if lat_centre is None or lon_centre is None or data.empty: return
-    temps_trajet_minutes = st.slider("Temps de trajet (min)", 5, 30, 15, 5, key="slider_isochrones_insee")
-    # La logique complète de cette fonction est conservée mais non affichée ici pour la concision. Elle reste dans votre code.
-    st.info(f"Logique d'affichage des isochrones INSEE pour {temps_trajet_minutes} min...")
-    # ... (votre code existant pour affichage_isochrones_insee) ...
-    pass  # Placeholder pour votre logique existante
-
-
-def choix_carte(data, lat_centre, lon_centre):
-    st.subheader("Choisissez un type d'affichage pour la carte :")
-    col1, col2, col3 = st.columns(3)
-    if "affichage_mode_insee" not in st.session_state: st.session_state["affichage_mode_insee"] = "points"
-    if col1.button("Points", key="btn_insee_points"): st.session_state["affichage_mode_insee"] = "points"
-    if col2.button("Cercles", key="btn_insee_cercles"): st.session_state["affichage_mode_insee"] = "cercles"
-    if col3.button("Isochrones", key="btn_insee_isochrones"): st.session_state["affichage_mode_insee"] = "isochrones"
-
-    if data is None or data.empty or lat_centre is None:
-        st.info("Aucun établissement ou département sélectionné.")
-        return
-
-    if st.session_state["affichage_mode_insee"] == "points":
-        affichage_carte_points(data, lat_centre, lon_centre)
-    elif st.session_state["affichage_mode_insee"] == "cercles":
-        affichage_carte_cercles(data, lat_centre, lon_centre)
-    elif st.session_state["affichage_mode_insee"] == "isochrones":
-        affichage_isochrones_insee(data, lat_centre, lon_centre)
-
+    return carte
 
 # =================================================================
-# Section des fonctions pour la page OSM (OPTIMISÉES)
+# Section des fonctions pour la page OSM
 # =================================================================
 
 @st.cache_data
@@ -101,7 +117,6 @@ def recherche_etablissements_osm(noms_etablissements, villes, max_etablissements
     else:
         st.info("Aucun établissement trouvé.")
     return df
-
 
 @st.cache_data
 def calculer_isochrone_et_cacher(longitude, latitude, temps_secondes):
@@ -198,8 +213,7 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                          poi_lat=None, poi_lon=None,
                          poi_analysis_mode='Isochrones', poi_radius_meters=1000):
     """
-    Crée une carte complète en incluant toutes les couches optionnelles
-    (socio, POI, risques, bâtiments, établissements).
+    Crée une carte complète. VERSION FINALE avec correction du style de survol.
     """
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=11, tiles="OpenStreetMap")
     legend_enseignes, colormap, single_value_info = {}, None, None
@@ -216,24 +230,37 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                 colormap.caption = nom_indicateur_socio or colonne_socio
             elif valeurs_non_nulles.nunique() == 1:
                 single_value_info = {"label": nom_indicateur_socio, "value": valeurs_non_nulles.iloc[0]}
-            tooltip_col_name = f"{colonne_socio}_display";
-            gdf_socio_clean[tooltip_col_name] = gdf_socio_clean[colonne_socio].apply(
-                lambda x: "ND" if pd.isna(x) else f"{x:,.0f}".replace(",", " "))
 
             def style_function_socio(feature):
                 value = feature['properties'].get(colonne_socio)
-                if pd.isna(value): return {'fillColor': '#cccccc', 'color': '#999999', 'weight': 1, 'fillOpacity': 0.6}
-                if colormap: return {'fillColor': colormap(value), 'color': 'black', 'weight': 1, 'fillOpacity': 0.7}
-                if single_value_info: return {'fillColor': '#800026', 'color': 'black', 'weight': 1, 'fillOpacity': 0.7}
-                return {'fillOpacity': 0, 'weight': 0}
+                style = {'fillOpacity': 0.7, 'weight': 0.5, 'color': '#555555'}
+                if pd.isna(value):
+                    style['fillColor'] = '#cccccc'
+                    style['fillOpacity'] = 0.5
+                elif colormap:
+                    style['fillColor'] = colormap(value)
+                elif single_value_info:
+                    style['fillColor'] = '#800026'
+                else:
+                    style['fillOpacity'] = 0
+                return style
+
+            ### CORRECTION : Définition du style au survol de la souris ###
+            highlight_function = lambda x: {'weight': 1, 'color': '#555555', 'fillOpacity': 0.8}
 
             cle_nom = 'NOM_COM' if 'NOM_COM' in gdf_socio_clean.columns else 'NOM_DEP'
-            tooltip = folium.features.GeoJsonTooltip(fields=[cle_nom, tooltip_col_name],
+            tooltip = folium.features.GeoJsonTooltip(fields=[cle_nom, colonne_socio],
                                                      aliases=['Zone:', f'{nom_indicateur_socio or colonne_socio}:'],
                                                      labels=True, style=(
                     "background-color: white; color: black; font-family: arial; font-size: 14px; padding: 10px;"))
-            folium.GeoJson(gdf_socio_clean, name="Données Socio-Éco", style_function=style_function_socio,
-                           tooltip=tooltip).add_to(m)
+
+            folium.GeoJson(
+                gdf_socio_clean,
+                name="Données Socio-Éco",
+                style_function=style_function_socio,
+                highlight_function=highlight_function,  # AJOUT DE CETTE LIGNE
+                tooltip=tooltip
+            ).add_to(m)
 
     # --- Couche Risque Inondation ---
     if gdf_inondations is not None and not gdf_inondations.empty:
@@ -264,105 +291,43 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
         tooltip_rga = folium.features.GeoJsonTooltip(fields=['NIVEAU_ALEA'], aliases=['Niveau de risque:'])
         folium.GeoJson(gdf_rga, style_function=style_function_rga, tooltip=tooltip_rga).add_to(fg_rga)
 
-    # --- Couche Point d'Intérêt Utilisateur ---
-    zone_analyse_geom = None
-    if poi_lat is not None and poi_lon is not None:
-        fg_poi_user = folium.FeatureGroup(name="Zone d'Analyse", show=True).add_to(m);
-        folium.Marker([poi_lat, poi_lon], tooltip="Votre point d'intérêt",
-                      icon=folium.Icon(icon='crosshairs', prefix='fa', color='red')).add_to(fg_poi_user)
-        poi_point_gdf = gpd.GeoDataFrame(geometry=[gpd.points_from_xy([poi_lon], [poi_lat])[0]], crs="EPSG:4326")
-        if poi_analysis_mode == 'Isochrones':
-            temps_secondes = (temps_isochrones * 0.9) * 60;
-            feature = calculer_isochrone_et_cacher(poi_lon, poi_lat, temps_secondes)
-            if feature and 'geometry' in feature:
-                zone_analyse_geom = shape(feature['geometry']);
-                folium.GeoJson(feature, style_function=lambda x: {'fillColor': 'red', 'color': 'red', 'weight': 2,
-                                                                  'fillOpacity': 0.15},
-                               tooltip=f"Zone accessible en {temps_isochrones} min").add_to(fg_poi_user)
-        elif poi_analysis_mode == "Cercle d'influence":
-            poi_reproj = poi_point_gdf.to_crs("EPSG:3857");
-            cercle_geom_reproj = poi_reproj.buffer(poi_radius_meters).iloc[0];
-            cercle_gdf_reproj = gpd.GeoDataFrame(geometry=[cercle_geom_reproj], crs="EPSG:3857");
-            cercle_gdf = cercle_gdf_reproj.to_crs("EPSG:4326")
-            zone_analyse_geom = cercle_gdf.geometry.iloc[0];
-            folium.GeoJson(cercle_gdf, style_function=lambda x: {'fillColor': 'red', 'color': 'red', 'weight': 2,
-                                                                 'fillOpacity': 0.15},
-                           tooltip=f"Cercle de {poi_radius_meters}m de rayon").add_to(fg_poi_user)
-
-    # --- Couche Bâtiments ---
-    if gdf_batiments is not None and not gdf_batiments.empty:
-        fg_batiments = folium.FeatureGroup(name="Bâtiments", show=True).add_to(m)
-
-        def style_function_batiments(feature):
-            geom = shape(feature['geometry'])
-            if zone_analyse_geom and geom.within(zone_analyse_geom):
-                return {'fillColor': '#3498db', 'color': '#2980b9', 'weight': 1.5, 'fillOpacity': 0.6}
-            else:
-                return {'fillColor': '#d3d3d3', 'color': '#808080', 'weight': 1, 'fillOpacity': 0.5}
-
-        tooltip_batiments = folium.features.GeoJsonTooltip(fields=['surface_m2'], aliases=['Surface :'], labels=True,
-                                                           localize=True,
-                                                           style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;")
-        folium.GeoJson(gdf_batiments, name="Bâtiments", style_function=style_function_batiments,
-                       tooltip=tooltip_batiments).add_to(fg_batiments)
-
-    # --- Couche des Établissements ---
+    # --- Couche des Établissements (reprise de la version fonctionnelle) ---
     if gdf_etablissements is not None and not gdf_etablissements.empty:
         fg_etablissements = folium.FeatureGroup(name="Établissements", show=True).add_to(m)
         couleurs = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33', '#a65628', '#f781bf']
         legend_enseignes = {nom: couleurs[i % len(couleurs)] for i, nom in
                             enumerate(gdf_etablissements['nom_etablissement'].unique())}
-        if mode_affichage_etablissements == 'Isochrones':
-            for _, row in gdf_etablissements.iterrows():
-                color = legend_enseignes.get(row['nom_etablissement'], 'gray');
-                coeff_row = df_coefficients[df_coefficients['ville'].str.lower() == row.get('ville',
-                                                                                            '').lower()] if df_coefficients is not None else pd.DataFrame()
-                coeff = coeff_row['coefficient'].iloc[0] if not coeff_row.empty else 0.9;
-                feature = calculer_isochrone_et_cacher(row.geometry.x, row.geometry.y, (temps_isochrones * coeff) * 60)
-                if feature: folium.GeoJson(feature,
-                                           style_function=lambda x, c=color: {'fillColor': c, 'color': c, 'weight': 2,
-                                                                              'fillOpacity': 0.25}).add_to(
-                    fg_etablissements)
         for _, row in gdf_etablissements.iterrows():
-            color = legend_enseignes.get(row['nom_etablissement'], 'gray');
-
-            popup_html = f"""
-            <b>Nom :</b> {row.get('nom_etablissement', 'N/A')}<br>
-            <b>Adresse :</b> {row.get('adresse_simplifiee', 'N/A')}<br>
-            <b>Précision :</b> {row.get('precision_geocodage', 'N/A')}
-            """
+            color = legend_enseignes.get(row['nom_etablissement'], 'gray')
+            popup_html = f"<b>Nom:</b> {row.get('nom_etablissement', 'N/A')}<br><b>Adresse:</b> {row.get('adresse', 'N/A')}"
             popup = folium.Popup(popup_html, max_width=300)
-
-            tooltip_text = row['nom_etablissement'];
-            border_color = color;
-            border_width = 2;
-            radius = 6
-            if zone_analyse_geom and row.geometry.within(zone_analyse_geom):
-                tooltip_text = f"DANS LA ZONE - {row['nom_etablissement']}";
-                border_color = 'red';
-                border_width = 4;
-                radius = 8
-            if mode_affichage_etablissements == 'Points':
-                folium.CircleMarker([row.geometry.y, row.geometry.x], radius=radius, color=border_color,
-                                    weight=border_width, fill=True, fill_color=color, fill_opacity=0.9, popup=popup,
-                                    tooltip=tooltip_text).add_to(fg_etablissements)
-            elif mode_affichage_etablissements == 'Cercles d\'influence':
-                folium.Circle([row.geometry.y, row.geometry.x], radius=rayon_cercles, color=color, fill=True,
+            tooltip_text = row['nom_etablissement']
+            if mode_affichage_etablissements == 'Cercles d\'influence':
+                folium.Circle(location=[row.geometry.y, row.geometry.x], radius=rayon_cercles, color=color, fill=True,
                               fill_color=color, fill_opacity=0.2).add_to(fg_etablissements)
-                folium.CircleMarker([row.geometry.y, row.geometry.x], radius=radius - 2, color=border_color,
-                                    weight=border_width, fill=True, fill_color=color, fill_opacity=0.9, popup=popup,
-                                    tooltip=tooltip_text).add_to(fg_etablissements)
             elif mode_affichage_etablissements == 'Isochrones':
-                folium.CircleMarker([row.geometry.y, row.geometry.x], radius=radius - 2, color=border_color,
-                                    weight=border_width, fill=True, fill_color=color, fill_opacity=0.9, popup=popup,
-                                    tooltip=tooltip_text).add_to(fg_etablissements)
+                temps_secondes = temps_isochrones * 60
+                coeff = 0.9
+                if df_coefficients is not None and not df_coefficients.empty:
+                    ville_etab = row.get('ville', '').lower()
+                    coeff_row = df_coefficients[df_coefficients['ville'].str.lower() == ville_etab]
+                    if not coeff_row.empty:
+                        coeff = coeff_row['coefficient'].iloc[0]
+                feature = calculer_isochrone_et_cacher(row.geometry.x, row.geometry.y, temps_secondes * coeff)
+                if feature:
+                    folium.GeoJson(feature, style_function=lambda x, c=color: {'fillColor': c, 'color': c, 'weight': 2,
+                                                                               'fillOpacity': 0.25}).add_to(
+                        fg_etablissements)
+            folium.CircleMarker(location=[row.geometry.y, row.geometry.x], radius=5, color='black', weight=1.5,
+                                fill=True, fill_color=color, fill_opacity=1, popup=popup, tooltip=tooltip_text).add_to(
+                fg_etablissements)
 
     # --- Couche des Points d'Intérêt (POI) Standards ---
     if gdf_poi is not None and not gdf_poi.empty:
         fg_poi = folium.FeatureGroup(name="Points d'Intérêt", show=True).add_to(m)
         for categorie, gdf_categorie in gdf_poi.groupby('categorie'):
-            config = POI_CONFIG.get(categorie, {});
-            icon_config = config.get('icon', {'icon': 'info-sign', 'color': 'gray', 'prefix': 'glyphicon'});
+            config = POI_CONFIG.get(categorie, {})
+            icon_config = config.get('icon', {'icon': 'info-sign', 'color': 'gray', 'prefix': 'glyphicon'})
             singular_name = config.get('singular', categorie)
             for _, poi in gdf_categorie.iterrows():
                 folium.Marker(location=[poi.geometry.y, poi.geometry.x], tooltip=f"{singular_name}: {poi['name']}",
@@ -413,8 +378,7 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
                              gdf_socio=None, colonne_socio=None, nom_indicateur_socio=None,
                              gdf_batiments=None, gdf_inondations=None, gdf_rga=None):
     """
-    Version intégrale : Crée une carte pour l'onglet "Analyse d'implantation",
-    en incluant toutes les couches optionnelles (socio, POI, bâtiments, inondations, rga).
+    Crée une carte pour l'onglet "Analyse d'implantation". VERSION FINALE avec correction du style de survol.
     """
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=14, tiles="OpenStreetMap")
     colormap, single_value_info = None, None
@@ -431,24 +395,37 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
                 colormap.caption = nom_indicateur_socio or colonne_socio
             elif valeurs_non_nulles.nunique() == 1:
                 single_value_info = {"label": nom_indicateur_socio, "value": valeurs_non_nulles.iloc[0]}
-            tooltip_col_name = f"{colonne_socio}_display";
-            gdf_socio_clean[tooltip_col_name] = gdf_socio_clean[colonne_socio].apply(
-                lambda x: "ND" if pd.isna(x) else f"{x:,.0f}".replace(",", " "))
 
             def style_function_socio(feature):
                 value = feature['properties'].get(colonne_socio)
-                if pd.isna(value): return {'fillColor': '#cccccc', 'color': '#999999', 'weight': 1, 'fillOpacity': 0.6}
-                if colormap: return {'fillColor': colormap(value), 'color': 'black', 'weight': 1, 'fillOpacity': 0.7}
-                if single_value_info: return {'fillColor': '#800026', 'color': 'black', 'weight': 1, 'fillOpacity': 0.7}
-                return {'fillOpacity': 0, 'weight': 0}
+                style = {'fillOpacity': 0.7, 'weight': 0.5, 'color': '#555555'}
+                if pd.isna(value):
+                    style['fillColor'] = '#cccccc'
+                    style['fillOpacity'] = 0.5
+                elif colormap:
+                    style['fillColor'] = colormap(value)
+                elif single_value_info:
+                    style['fillColor'] = '#800026'
+                else:
+                    style['fillOpacity'] = 0
+                return style
+
+            ### CORRECTION : Définition du style au survol de la souris ###
+            highlight_function = lambda x: {'weight': 1, 'color': '#555555', 'fillOpacity': 0.8}
 
             cle_nom = 'NOM_COM' if 'NOM_COM' in gdf_socio_clean.columns else 'NOM_DEP'
-            tooltip = folium.features.GeoJsonTooltip(fields=[cle_nom, tooltip_col_name],
+            tooltip = folium.features.GeoJsonTooltip(fields=[cle_nom, colonne_socio],
                                                      aliases=['Zone:', f'{nom_indicateur_socio or colonne_socio}:'],
                                                      labels=True, style=(
                     "background-color: white; color: black; font-family: arial; font-size: 14px; padding: 10px;"))
-            folium.GeoJson(gdf_socio_clean, name="Données Socio-Éco", style_function=style_function_socio,
-                           tooltip=tooltip).add_to(m)
+
+            folium.GeoJson(
+                gdf_socio_clean,
+                name="Données Socio-Éco",
+                style_function=style_function_socio,
+                highlight_function=highlight_function,  # AJOUT DE CETTE LIGNE
+                tooltip=tooltip
+            ).add_to(m)
 
     # --- Couche Risque Inondation ---
     if gdf_inondations is not None and not gdf_inondations.empty:
@@ -492,32 +469,14 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
     if gdf_batiments is not None and not gdf_batiments.empty:
         fg_batiments = folium.FeatureGroup(name="Bâtiments", show=True).add_to(m)
         style_function_batiments = {'fillColor': '#3498db', 'color': '#2980b9', 'weight': 1.5, 'fillOpacity': 0.6}
-
-        # Tooltip au survol (déjà présent)
-        tooltip_batiments = folium.features.GeoJsonTooltip(
-            fields=['surface_m2'],
-            aliases=['Surface (m²):'],
-            labels=True,
-            localize=True,
-            style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;"
-        )
-
-        # Popup au clic (AJOUT)
-        popup_batiments = folium.features.GeoJsonPopup(
-            fields=['surface_m2'],
-            aliases=['Surface (m²):'],
-            labels=True,
-            localize=True,
-            style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;"
-        )
-
-        folium.GeoJson(
-            gdf_batiments,
-            name="Bâtiments",
-            style_function=lambda x: style_function_batiments,
-            tooltip=tooltip_batiments,
-            popup=popup_batiments  # Ajout du popup
-        ).add_to(fg_batiments)
+        tooltip_batiments = folium.features.GeoJsonTooltip(fields=['surface_m2'], aliases=['Surface (m²):'],
+                                                           labels=True, localize=True,
+                                                           style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;")
+        popup_batiments = folium.features.GeoJsonPopup(fields=['surface_m2'], aliases=['Surface (m²):'], labels=True,
+                                                       localize=True,
+                                                       style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;")
+        folium.GeoJson(gdf_batiments, name="Bâtiments", style_function=lambda x: style_function_batiments,
+                       tooltip=tooltip_batiments, popup=popup_batiments).add_to(fg_batiments)
 
     # --- Couche des POI trouvés dans la zone ---
     if gdf_poi_trouves is not None and not gdf_poi_trouves.empty:
@@ -526,12 +485,9 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
             categorie = poi.get('categorie', 'Inconnue')
             config = POI_CONFIG.get(categorie, {})
             icon_config = config.get('icon', {'icon': 'info-sign', 'color': 'gray', 'prefix': 'glyphicon'})
-            folium.Marker(
-                location=[poi.geometry.y, poi.geometry.x],
-                tooltip=f"{categorie}: {poi.get('name', 'N/A')}",
-                icon=folium.Icon(icon=icon_config['icon'], color=icon_config['color'],
-                                 prefix=icon_config.get('prefix', 'glyphicon'))
-            ).add_to(fg_poi)
+            folium.Marker(location=[poi.geometry.y, poi.geometry.x], tooltip=f"{categorie}: {poi.get('name', 'N/A')}",
+                          icon=folium.Icon(icon=icon_config['icon'], color=icon_config['color'],
+                                           prefix=icon_config.get('prefix', 'glyphicon'))).add_to(fg_poi)
 
     folium.LayerControl().add_to(m)
     return m, colormap, single_value_info

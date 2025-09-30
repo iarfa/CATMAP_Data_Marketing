@@ -14,8 +14,8 @@ path_centres_departements = "../data/Centres_departements.xlsx"
 path_communes_france = "../data/Communes_France_Metro.xlsx"
 path_iris_socio = "../data/iris_socio_data_final.parquet"
 path_coeff_trafic = "../data/coefficient_temps_trajet.xlsx"
-path_zones_inondables = "../data/zones_inondables.parquet"
-path_rga_secheresse = "../data/rga_secheresse.parquet"
+path_zones_inondables = "../data/zones_inondables_v2.parquet"
+path_rga_secheresse = "../data/rga_secheresse_v2.parquet"
 
 # =======================
 # 🎨 Personnalisation de la page
@@ -29,7 +29,6 @@ page = navigation()
 
 if page == "accueil":
     page_accueil()
-elif page == "insee":
-    page_insee(path_etablissement, path_centres_departements)
+# elif page == "insee": page_insee(path_etablissement, path_centres_departements) on affiche plus la page insee
 elif page == "osm":
     page_osm(path_communes_france, path_iris_socio, path_coeff_trafic, path_zones_inondables, path_rga_secheresse)
