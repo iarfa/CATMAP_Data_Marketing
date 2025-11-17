@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  db_sirene:
+    # On utilise l'image officielle PostGIS qui inclut PostgreSQL
+    image: postgis/postgis:16-3.4
+    container_name: bdd_sirene_postgis
+    environment:
+      # Définissez votre propre mot de passe
+      POSTGRES_USER: sirene_user
+      POSTGRES_PASSWORD: application_catmap_datamarketing_geodata2025!
+      POSTGRES_DB: sirene_france
+    volumes:
+      # Ce volume est CRUCIAL. Il sauvegarde vos 20Go de données
+      # sur votre disque dur, pour ne pas tout perdre au redémarrage.
+      - db_data:/var/lib/postgresql/data
+    ports:
+      # On l'expose sur le port 5433 pour ne pas
+      # avoir de conflit si vous avez un autre Postgres (5432).
+      - "5433:5432"
+    restart: unless-stopped
+
+volumes:
+  db_data:
+    # Ce volume est géré par Docker
