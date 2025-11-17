@@ -1,5 +1,16 @@
-.idea/
-*.parquet
+# Ignorer tous les environnements virtuels
 venv/
+.venv/
+
+# Ignorer les caches Python
 __pycache__/
+
+# Ignorer TOUS les fichiers de données volumineux, OÙ QU'ILS SOIENT
+*.csv
+*.parquet
+*.zip
+*.gz
 *.xlsx
+
+# Ignorer les petits fichiers (pas pour l'instant)
+# !data/un_petit_fichier.csv
