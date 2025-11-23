@@ -72,13 +72,14 @@ def render_tab_concurrence(df_communes, df_coefficients, gdf_socio_filtre, indic
                            poi_selectionnes_sidebar, gdf_inondations, gdf_rga,
                            engine):
     """
-    Gère l'affichage de l'onglet concurrence avec séparation stricte des modes via des sous-onglets.
+    Gère l'affichage de l'onglet concurrence avec séparation stricte des modes.
+    Récupère les coordonnées de l'établissement SIREN pour les afficher sur la carte.
     """
     st.header("Analyse de la Concurrence")
 
     subtab_osm, subtab_siren = st.tabs(["🔍 Par Enseigne (OSM)", "🏢 Par Activité (SIREN)"])
 
-    # --- SOUS-ONGLET 1 : OpenStreetMap (INCHANGÉ) ---
+    # --- SOUS-ONGLET 1 : OpenStreetMap ---
     with subtab_osm:
         st.info(
             "Rechercher des enseignes par leur nom (ex: 'Lidl', 'Carrefour') dans une zone géographique via OpenStreetMap.")
@@ -99,28 +100,39 @@ def render_tab_concurrence(df_communes, df_coefficients, gdf_socio_filtre, indic
                 nom_indicateur=nom_indicateur,
                 poi_selectionnes_sidebar=poi_selectionnes_sidebar,
                 gdf_inondations=gdf_inondations,
-                gdf_rga=gdf_rga
+                gdf_rga=gdf_rga,
+                # Pas de point de référence en mode OSM manuel
+                ref_lat=None, ref_lon=None, ref_nom=None
             )
 
-    # --- SOUS-ONGLET 2 : Base SIREN (MODIFIÉ) ---
+    # --- SOUS-ONGLET 2 : Base SIREN ---
     with subtab_siren:
         st.info("Trouver des concurrents ayant le même code NAF qu'un établissement de référence.")
         gdf_concurrents = interface_recherche_concurrence(engine)
 
+        # --- Récupération des infos du point de référence ---
+        ref_lat = None
+        ref_lon = None
+        ref_nom = "Votre Établissement"
+
+        if st.session_state.get('etab_concurrence_details'):
+            details = st.session_state.etab_concurrence_details
+            # On récupère les coordonnées stockées (Assurez-vous que get_etab_details les retourne !)
+            ref_lat = details.get('latitude')
+            ref_lon = details.get('longitude')
+            ref_nom = details.get('denominationunitelegale', "Votre Établissement")
+
         if not gdf_concurrents.empty:
             # Tableau des résultats
             if st.checkbox("Afficher le détail des concurrents SIREN (tableau)", value=True, key="details_table_siren"):
-                # MODIFIÉ : Ajout explicite de 'siret' et 'siren'
                 cols_to_show = [
-                    'siren',
-                    'siret',
                     'denominationunitelegale',
-                    'adresse',
-                    'libellecommuneetablissement',
+                    'siret',
+                    'siren',
+                    'adresse',  # On garde l'adresse, on retire la ville qui n'existe plus
                     'activiteprincipaleetablissement',
-                    'intitules_naf_vf'  # Nom standard puisque cela fonctionne
+                    'intitules_naf_vf'
                 ]
-                # Filtrage robuste
                 cols_existantes = [col for col in cols_to_show if col in gdf_concurrents.columns]
                 st.dataframe(gdf_concurrents[cols_existantes])
 
@@ -133,26 +145,41 @@ def render_tab_concurrence(df_communes, df_coefficients, gdf_socio_filtre, indic
                 nom_indicateur=nom_indicateur,
                 poi_selectionnes_sidebar=poi_selectionnes_sidebar,
                 gdf_inondations=gdf_inondations,
-                gdf_rga=gdf_rga
+                gdf_rga=gdf_rga,
+                # On passe les coordonnées du point rouge
+                ref_lat=ref_lat,
+                ref_lon=ref_lon,
+                ref_nom=ref_nom
             )
 
 
 def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients, gdf_socio_filtre, indicateur,
-                                    nom_indicateur, poi_selectionnes_sidebar, gdf_inondations, gdf_rga):
+                                    nom_indicateur, poi_selectionnes_sidebar, gdf_inondations, gdf_rga, ref_lat=None,
+                                    ref_lon=None, ref_nom=None):
     """
-    Fonction helper interne pour afficher la carte (inchangée pour la logique carto, copiée ici pour complétude du bloc).
+    Fonction helper pour afficher la carte de concurrence.
+    Accepte désormais ref_lat/ref_lon pour afficher l'établissement de référence.
     """
     st.markdown("---")
     st.subheader(f"Carte Interactive ({source_name})")
 
-    lat_centre, lon_centre = choix_centre_OSM(gdf_resultats)
+    # Centrage : Si on a un point de référence, on peut centrer dessus, sinon sur la moyenne des concurrents
+    if ref_lat and ref_lon:
+        lat_centre, lon_centre = ref_lat, ref_lon
+    else:
+        lat_centre, lon_centre = choix_centre_OSM(gdf_resultats)
 
+    # Recherche POI
     gdf_poi_final = gpd.GeoDataFrame()
     if poi_selectionnes_sidebar:
         bounds = gdf_resultats.total_bounds
+        # Si un seul point (ref), bounds peut être minuscule, on élargit
+        if len(gdf_resultats) < 2 and ref_lat:
+            bounds = [ref_lon - 0.05, ref_lat - 0.05, ref_lon + 0.05, ref_lat + 0.05]
+
         marge = 0.05
         bbox_poi = (bounds[0] - marge, bounds[1] - marge, bounds[2] + marge, bounds[3] + marge)
-        with st.spinner(f"Recherche des points d'intérêt pour la carte {source_name}..."):
+        with st.spinner(f"Recherche des points d'intérêt..."):
             liste_gdf_poi = [rechercher_poi_osm(bbox_poi, POI_CONFIG[cat]['tags']).assign(categorie=cat) for cat in
                              poi_selectionnes_sidebar]
             liste_gdf_poi_non_vides = [gdf for gdf in liste_gdf_poi if not gdf.empty]
@@ -188,7 +215,11 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
         mode_affichage_etablissements=mode_affichage,
         rayon_cercles=rayon_cercles,
         temps_isochrones=temps_isochrones,
-        df_coefficients=df_coefficients
+        df_coefficients=df_coefficients,
+        # Arguments pour le point de référence
+        ref_lat=ref_lat,
+        ref_lon=ref_lon,
+        ref_nom=ref_nom
     )
 
     col_carte, col_legende = st.columns([3, 1])
@@ -197,6 +228,12 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
 
     with col_legende:
         st.write("**Légendes**")
+
+        if ref_lat:
+            st.markdown(f'<span style="color:red; font-size:22px;">★</span> <b>Votre Établissement</b>',
+                        unsafe_allow_html=True)
+            st.markdown("---")
+
         if legend_enseignes:
             st.write("**Concurrents**")
             for nom, color in legend_enseignes.items():
@@ -205,6 +242,7 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
             if len(legend_enseignes) > 10:
                 st.write("...")
 
+        # (Affichage des légendes risques/socio inchangé...)
         if not gdf_inondations.empty:
             st.markdown("---")
             st.write("**Risque Inondation**")
@@ -232,7 +270,6 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
             elif legend_socio_single:
                 st.write(f"**{legend_socio_single['label']}**")
                 st.markdown(f"Val: **{legend_socio_single['value']:,.0f}**")
-
 
 # =============================================================================
 # LOGIQUE DE L'ONGLET N°2 : ANALYSE D'UNE ZONE D'IMPLANTATION (MODIFIÉ - Tâche 5)

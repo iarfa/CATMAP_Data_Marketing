@@ -8,6 +8,7 @@ from fonctions_basiques import (
     find_etablissement_by_siret,
     find_etablissements_by_siren,
     get_etab_details_for_concurrence,
+    extraire_ville_depuis_adresse,
     find_concurrents
 )
 
@@ -388,23 +389,26 @@ def interface_point_interet(engine):
 
     return resultat
 
-
 def interface_selection_batiments():
     """
     Affiche les contrôles pour l'affichage des bâtiments.
     """
     afficher_batiments = False
-    surface_min = 0
-    surface_max = 5000
+    surface_min = 100
+    surface_max = 250
 
     with st.expander("🏙️ Afficher et filtrer les bâtiments dans la zone"):
+        # --- NOUVEAU : Avertissement proactif ---
+        st.info(
+            "ℹ️ **Note importante :** L'affichage des bâtiments nécessite une surface. Il est disponible uniquement avec les modes **'Cercle d'influence'** et **'Isochrones'** (pas en 'Point seul').")
+
         afficher_batiments = st.toggle(
             "Activer l'affichage des bâtiments",
-            help="Affiche l'emprise au sol des bâtiments présents dans la zone d'analyse définie."
+            help="Affiche l'emprise au sol des bâtiments (Nécessite le mode Cercle ou Isochrone)."
         )
 
         if afficher_batiments:
-            st.markdown("Filtrer par surface :")
+            st.markdown("Filtrer par surface au sol :")
             col1, col2 = st.columns(2)
 
             with col1:
@@ -412,7 +416,7 @@ def interface_selection_batiments():
                     "Min (m²)",
                     min_value=0,
                     max_value=100000,
-                    value=50,
+                    value=0,
                     step=10,
                     key="surface_min"
                 )
@@ -422,13 +426,12 @@ def interface_selection_batiments():
                     "Max (m²)",
                     min_value=0,
                     max_value=100000,
-                    value=500,
-                    step=10,
+                    value=3000,
+                    step=50,
                     key="surface_max"
                 )
 
     return afficher_batiments, surface_min, surface_max
-
 
 def interface_selection_risques(df_communes):
     """
@@ -484,7 +487,6 @@ def interface_selection_risques(df_communes):
 
     return risque_selectionne, regions_filtrees, departements_filtres
 
-
 # ==================================================================
 # Interface NOUVEAU : Interface pour l'étude de concurrence
 # ==================================================================
@@ -494,10 +496,9 @@ def interface_recherche_concurrence(engine):
     Affiche l'interface pour l'analyse de concurrence par SIRET + NAF.
     """
     if not engine:
-        st.info("La connexion à la base de données SIREN est requise pour cette fonctionnalité.")
+        st.info("Connexion BDD requise.")
         return gpd.GeoDataFrame()
 
-    # Initialisation
     if 'etab_concurrence_details' not in st.session_state:
         st.session_state.etab_concurrence_details = None
 
@@ -508,47 +509,52 @@ def interface_recherche_concurrence(engine):
 
     if st.button("1. Rechercher cet établissement", key="concurrence_search_siret"):
         st.session_state.etab_concurrence_details = get_etab_details_for_concurrence(engine, siret_input)
-        st.session_state.gdf_concurrents = gpd.GeoDataFrame() # Reset
+        st.session_state.gdf_concurrents = gpd.GeoDataFrame()
 
-    # Si l'établissement est trouvé, on affiche l'étape 2
     if st.session_state.etab_concurrence_details:
         details = st.session_state.etab_concurrence_details
+
         code_naf = details.get('activiteprincipaleetablissement')
-        desc_naf = details.get('intitules_naf_vf', 'Description non disponible') # MODIFIÉ
-        commune = details.get('libellecommuneetablissement')
+        desc_naf = details.get('description_naf', "Non disponible")
+        adresse_complete = details.get('adresse', '')
         num_dep = details.get('numero_dep')
         nom_dep = details.get('nom_dep')
 
+        # Extraction de la ville de référence pour l'affichage et le filtre
+        ville_ref = extraire_ville_depuis_adresse(adresse_complete)
+
         st.success(f"Établissement trouvé : **{details.get('denominationunitelegale')}**")
-        # MODIFIÉ : Affichage enrichi avec la description NAF
-        st.info(f"Code NAF : **{code_naf}** - *{desc_naf}*")
-        st.caption(f"Localisation : **{commune} ({nom_dep})**")
+        st.info(f"Code NAF : **{code_naf}** ({desc_naf})")
+        st.caption(f"📍 {adresse_complete} ({nom_dep})")
 
         st.markdown("---")
-        st.subheader("2. Définir la zone de recherche des concurrents")
+        st.subheader("2. Définir la zone de recherche")
 
-        scope_options = [f"Ville ({commune})", f"Département ({nom_dep})"]
+        # MODIFIÉ : Choix réactivé
         scope_choice = st.radio(
-            "Rechercher les concurrents (même code NAF) dans :",
-            options=scope_options,
+            "Rechercher les concurrents (même NAF) dans :",
+            options=[f"Ville ({ville_ref})", f"Département ({nom_dep})"],
             key="concurrence_scope"
         )
 
-        scope = None
-        scope_value = None
-        if scope_choice == f"Ville ({commune})":
-            scope = "Ville"
-            scope_value = commune
-        elif scope_choice == f"Département ({nom_dep})":
-            scope = "Département"
-            scope_value = num_dep
+        # Définition des paramètres de filtre
+        scope = "Ville" if "Ville" in scope_choice else "Département"
+        # Important : scope_value reste le DEPARTEMENT pour la requête SQL principale
+        scope_value = num_dep
 
-        if st.button("2. Lancer la recherche de concurrents", type="primary", key="concurrence_find"):
+        if st.button("2. Lancer la recherche", type="primary", key="concurrence_find"):
             if scope and code_naf:
-                gdf_concurrents = find_concurrents(engine, siret_input, code_naf, scope, scope_value)
+                gdf_concurrents = find_concurrents(
+                    engine,
+                    siret_input,
+                    code_naf,
+                    scope,
+                    scope_value,
+                    ville_origine=ville_ref  # On passe la ville pour le filtre Python
+                )
                 st.session_state.gdf_concurrents = gdf_concurrents
             else:
-                st.error("Impossible de lancer la recherche, informations manquantes.")
+                st.error("Informations manquantes.")
 
     return st.session_state.get('gdf_concurrents', gpd.GeoDataFrame())
 
