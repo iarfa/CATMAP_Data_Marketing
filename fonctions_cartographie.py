@@ -241,120 +241,141 @@ def creer_carte_enrichie(gdf_etablissements, lat_centre, lon_centre,
                          mode_affichage_etablissements='Points', rayon_cercles=1000, temps_isochrones=10,
                          df_coefficients=None,
                          poi_lat=None, poi_lon=None,
-                         poi_analysis_mode='Isochrones', poi_radius_meters=1000):
+                         poi_analysis_mode='Isochrones', poi_radius_meters=1000,
+                         # NOUVEAUX ARGUMENTS pour le point de référence
+                         ref_lat=None, ref_lon=None, ref_nom="Votre Établissement"):
     """
     Crée une carte complète en incluant toutes les couches optionnelles.
+    Affiche un marqueur distinct pour l'établissement de référence (SIREN) si fourni.
     """
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=11, tiles="OpenStreetMap")
     legend_enseignes = {}
 
+    # 1. Couches Contextuelles (Socio, Risques, etc.)
+    # Note: J'utilise vos helpers internes _ajouter_couche_... s'ils sont définis dans ce fichier
+    # Sinon, assurez-vous qu'ils sont accessibles ou intégrés ici.
+    # Pour simplifier l'exemple, je suppose que ces fonctions existent (comme dans votre code d'origine).
     colormap, single_value_info = _ajouter_couche_socio(m, gdf_socio, colonne_socio, nom_indicateur_socio)
     _ajouter_couche_risques_inondation(m, gdf_inondations)
     _ajouter_couche_risques_rga(m, gdf_rga)
 
+    # 2. Point de Référence (Votre Établissement) - NOUVEAU
+    if ref_lat is not None and ref_lon is not None:
+        fg_ref = folium.FeatureGroup(name="📍 Votre Établissement", show=True).add_to(m)
+
+        popup_html = f"<b>{ref_nom}</b><br>(Point de référence)"
+
+        folium.Marker(
+            location=[ref_lat, ref_lon],
+            popup=folium.Popup(popup_html, max_width=300),
+            tooltip=f"Votre Établissement : {ref_nom}",
+            # Icône Rouge distincte avec une étoile
+            icon=folium.Icon(color='red', icon='star', prefix='fa')
+        ).add_to(fg_ref)
+
+    # 3. Zone d'analyse utilisateur (POI manuel)
     zone_analyse_geom = None
     if poi_lat is not None and poi_lon is not None:
-        fg_poi_user = folium.FeatureGroup(name="Zone d'Analyse", show=True).add_to(m);
-        folium.Marker([poi_lat, poi_lon], tooltip="Votre point d'intérêt",
-                      icon=folium.Icon(icon='crosshairs', prefix='fa', color='red')).add_to(fg_poi_user)
-        poi_point_gdf = gpd.GeoDataFrame(geometry=[gpd.points_from_xy([poi_lon], [poi_lat])[0]], crs="EPSG:4326")
+        fg_poi_user = folium.FeatureGroup(name="Zone d'Analyse (Cible)", show=True).add_to(m)
+        folium.Marker([poi_lat, poi_lon], tooltip="Point cible",
+                      icon=folium.Icon(icon='crosshairs', prefix='fa', color='black')).add_to(fg_poi_user)
+
         if poi_analysis_mode == 'Isochrones':
-            temps_secondes = (temps_isochrones * 0.9) * 60;
+            temps_secondes = (temps_isochrones * 0.9) * 60
             feature = calculer_isochrone_et_cacher(poi_lon, poi_lat, temps_secondes)
             if feature and 'geometry' in feature:
-                zone_analyse_geom = shape(feature['geometry']);
-                folium.GeoJson(feature, style_function=lambda x: {'fillColor': 'red', 'color': 'red', 'weight': 2,
-                                                                  'fillOpacity': 0.15},
-                               tooltip=f"Zone accessible en {temps_isochrones} min").add_to(fg_poi_user)
+                zone_analyse_geom = shape(feature['geometry'])
+                folium.GeoJson(feature, style_function=lambda x: {'fillColor': 'black', 'color': 'black', 'weight': 2,
+                                                                  'fillOpacity': 0.1},
+                               tooltip=f"Zone cible {temps_isochrones} min").add_to(fg_poi_user)
         elif poi_analysis_mode == "Cercle d'influence":
-            poi_reproj = poi_point_gdf.to_crs("EPSG:3857");
-            cercle_geom_reproj = poi_reproj.buffer(poi_radius_meters).iloc[0];
-            cercle_gdf_reproj = gpd.GeoDataFrame(geometry=[cercle_geom_reproj], crs="EPSG:3857");
-            cercle_gdf = cercle_gdf_reproj.to_crs("EPSG:4326")
-            zone_analyse_geom = cercle_gdf.geometry.iloc[0];
-            folium.GeoJson(cercle_gdf, style_function=lambda x: {'fillColor': 'red', 'color': 'red', 'weight': 2,
-                                                                 'fillOpacity': 0.15},
-                           tooltip=f"Cercle de {poi_radius_meters}m de rayon").add_to(fg_poi_user)
+            poi_point_gdf = gpd.GeoDataFrame(geometry=[gpd.points_from_xy([poi_lon], [poi_lat])[0]], crs="EPSG:4326")
+            zone_geom = poi_point_gdf.to_crs("EPSG:3857").buffer(poi_radius_meters).to_crs("EPSG:4326").geometry.iloc[0]
+            zone_analyse_geom = zone_geom
+            folium.GeoJson(gpd.GeoDataFrame(geometry=[zone_geom], crs="EPSG:4326"),
+                           style_function=lambda x: {'fillColor': 'black', 'color': 'black', 'weight': 2,
+                                                     'fillOpacity': 0.1}).add_to(fg_poi_user)
 
+    # 4. Bâtiments (si présents)
     if gdf_batiments is not None and not gdf_batiments.empty:
         fg_batiments = folium.FeatureGroup(name="Bâtiments", show=True).add_to(m)
 
-        def style_function_batiments(feature):
-            geom = shape(feature['geometry'])
-            if zone_analyse_geom and geom.within(zone_analyse_geom):
-                return {'fillColor': '#3498db', 'color': '#2980b9', 'weight': 1.5, 'fillOpacity': 0.6}
-            else:
-                return {'fillColor': '#d3d3d3', 'color': '#808080', 'weight': 1, 'fillOpacity': 0.5}
+        def style_bat(feature):
+            return {'fillColor': '#3498db', 'color': '#2980b9', 'weight': 1, 'fillOpacity': 0.6}
 
-        tooltip_batiments = folium.features.GeoJsonTooltip(fields=['surface_m2'], aliases=['Surface :'], labels=True,
-                                                           localize=True,
-                                                           style="background-color: white; color: black; font-family: arial; font-size: 12px; padding: 5px;")
-        folium.GeoJson(gdf_batiments, name="Bâtiments", style_function=style_function_batiments,
-                       tooltip=tooltip_batiments).add_to(fg_batiments)
+        folium.GeoJson(gdf_batiments, style_function=style_bat,
+                       tooltip=folium.features.GeoJsonTooltip(fields=['surface_m2'])).add_to(fg_batiments)
 
+    # 5. Établissements (Concurrents)
     if gdf_etablissements is not None and not gdf_etablissements.empty:
-        fg_etablissements = folium.FeatureGroup(name="Établissements", show=True).add_to(m)
-        couleurs = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33', '#a65628', '#f781bf']
+        fg_etablissements = folium.FeatureGroup(name="Concurrents", show=True).add_to(m)
 
-        # S'assurer que 'nom_etablissement' n'a pas de NaT/NaN qui font planter .unique()
+        # Palette de couleurs SANS le rouge (réservé au user)
+        couleurs = ['#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33', '#a65628', '#f781bf']
         noms_uniques = gdf_etablissements['nom_etablissement'].dropna().unique()
         legend_enseignes = {nom: couleurs[i % len(couleurs)] for i, nom in enumerate(noms_uniques)}
 
+        # Mode Isochrones pour les concurrents
         if mode_affichage_etablissements == 'Isochrones':
             for _, row in gdf_etablissements.iterrows():
-                color = legend_enseignes.get(row['nom_etablissement'], 'gray');
-                coeff_row = df_coefficients[df_coefficients['ville'].str.lower() == row.get('ville',
-                                                                                            '').lower()] if df_coefficients is not None else pd.DataFrame()
-                coeff = coeff_row['coefficient'].iloc[0] if not coeff_row.empty else 0.9;
+                color = legend_enseignes.get(row['nom_etablissement'], 'gray')
+                # Calcul simple coeff
+                coeff = 0.9  # Valeur par défaut
+                if df_coefficients is not None:
+                    match = df_coefficients[df_coefficients['ville'].str.lower() == row.get('ville', '').lower()]
+                    if not match.empty: coeff = match['coefficient'].iloc[0]
+
                 feature = calculer_isochrone_et_cacher(row.geometry.x, row.geometry.y, (temps_isochrones * coeff) * 60)
-                if feature: folium.GeoJson(feature,
-                                           style_function=lambda x, c=color: {'fillColor': c, 'color': c, 'weight': 2,
-                                                                              'fillOpacity': 0.25}).add_to(
-                    fg_etablissements)
+                if feature:
+                    folium.GeoJson(feature, style_function=lambda x, c=color: {'fillColor': c, 'color': c, 'weight': 2,
+                                                                               'fillOpacity': 0.25}).add_to(
+                        fg_etablissements)
+
+        # Affichage des marqueurs
         for _, row in gdf_etablissements.iterrows():
-            color = legend_enseignes.get(row['nom_etablissement'], 'gray');
+            color = legend_enseignes.get(row['nom_etablissement'], 'gray')
 
             popup_html = f"""
-            <b>Nom :</b> {row.get('nom_etablissement', 'N/A')}<br>
-            <b>Adresse :</b> {row.get('adresse_simplifiee', 'N/A')}<br>
-            <b>Précision :</b> {row.get('precision_geocodage', 'N/A')}
+            <b>{row.get('nom_etablissement', 'N/A')}</b><br>
+            {row.get('adresse_simplifiee', 'N/A')}
             """
             popup = folium.Popup(popup_html, max_width=300)
 
-            tooltip_text = row['nom_etablissement'];
-            border_color = color;
-            border_width = 2;
+            tooltip_text = row['nom_etablissement']
+            border_color = color
             radius = 6
+            weight = 2
+
+            # Si le concurrent est dans la zone cible
             if zone_analyse_geom and row.geometry.within(zone_analyse_geom):
-                tooltip_text = f"DANS LA ZONE - {row['nom_etablissement']}";
-                border_color = 'red';
-                border_width = 4;
+                tooltip_text = f"DANS LA ZONE - {row['nom_etablissement']}"
+                border_color = 'black'
+                weight = 3
                 radius = 8
-            if mode_affichage_etablissements == 'Points':
+
+            if mode_affichage_etablissements in ['Points', 'Isochrones']:
                 folium.CircleMarker([row.geometry.y, row.geometry.x], radius=radius, color=border_color,
-                                    weight=border_width, fill=True, fill_color=color, fill_opacity=0.9, popup=popup,
-                                    tooltip=tooltip_text).add_to(fg_etablissements)
+                                    weight=weight, fill=True, fill_color=color, fill_opacity=0.9,
+                                    popup=popup, tooltip=tooltip_text).add_to(fg_etablissements)
+
             elif mode_affichage_etablissements == 'Cercles d\'influence':
+                # Cercle de zone
                 folium.Circle([row.geometry.y, row.geometry.x], radius=rayon_cercles, color=color, fill=True,
                               fill_color=color, fill_opacity=0.2).add_to(fg_etablissements)
-                folium.CircleMarker([row.geometry.y, row.geometry.x], radius=radius - 2, color=border_color,
-                                    weight=border_width, fill=True, fill_color=color, fill_opacity=0.9, popup=popup,
-                                    tooltip=tooltip_text).add_to(fg_etablissements)
-            elif mode_affichage_etablissements == 'Isochrones':
-                folium.CircleMarker([row.geometry.y, row.geometry.x], radius=radius - 2, color=border_color,
-                                    weight=border_width, fill=True, fill_color=color, fill_opacity=0.9, popup=popup,
+                # Point central
+                folium.CircleMarker([row.geometry.y, row.geometry.x], radius=4, color='white', weight=1,
+                                    fill=True, fill_color=color, fill_opacity=1, popup=popup,
                                     tooltip=tooltip_text).add_to(fg_etablissements)
 
+    # 6. POI Contextuels
     if gdf_poi is not None and not gdf_poi.empty:
         fg_poi = folium.FeatureGroup(name="Points d'Intérêt", show=True).add_to(m)
-        for categorie, gdf_categorie in gdf_poi.groupby('categorie'):
-            config = POI_CONFIG.get(categorie, {});
-            icon_config = config.get('icon', {'icon': 'info-sign', 'color': 'gray', 'prefix': 'glyphicon'});
-            singular_name = config.get('singular', categorie)
-            for _, poi in gdf_categorie.iterrows():
-                folium.Marker(location=[poi.geometry.y, poi.geometry.x], tooltip=f"{singular_name}: {poi['name']}",
-                              icon=folium.Icon(icon=icon_config['icon'], color=icon_config['color'],
-                                               prefix=icon_config.get('prefix', 'glyphicon'))).add_to(fg_poi)
+        for _, poi in gdf_poi.iterrows():
+            cat = poi.get('categorie', 'Divers')
+            conf = POI_CONFIG.get(cat, {'icon': {'icon': 'info', 'color': 'gray', 'prefix': 'fa'}})
+            folium.Marker([poi.geometry.y, poi.geometry.x], tooltip=f"{cat}: {poi['name']}",
+                          icon=folium.Icon(icon=conf['icon']['icon'], color=conf['icon']['color'],
+                                           prefix=conf['icon']['prefix'])).add_to(fg_poi)
 
     folium.LayerControl().add_to(m)
     return m, legend_enseignes, colormap, single_value_info
@@ -500,60 +521,97 @@ def creer_carte_implantation(lat_centre, lon_centre,
     return m, colormap, single_value_info
 
 
-@st.cache_data(show_spinner="Recherche des bâtiments...")
+@st.cache_data(show_spinner="Recherche des bâtiments (Overpass API)...")
 def rechercher_batiments_osm(bbox):
     """
-    Interroge l'API Overpass pour trouver les polygones des bâtiments dans une zone,
-    et calcule leur surface en mètres carrés.
+    Interroge l'API Overpass pour trouver les bâtiments.
+    VERSION DIAGNOSTIC : Affiche des messages d'erreur détaillés dans l'interface.
     """
+    # 1. Vérification de la bbox
+    if not bbox or len(bbox) != 4:
+        st.error("❌ Erreur Interne : La zone de recherche (bbox) est invalide ou vide.")
+        return gpd.GeoDataFrame()
+
+    # On affiche la bbox pour vérifier qu'on est bien en France (Lat ~40-50, Lon ~-5 à 10)
+    # st.info(f"🔍 Zone de recherche envoyée à OSM : {bbox}")
+
+    # 2. Vérification de la taille
     try:
         bbox_poly = box(*bbox)
         gdf_bbox = gpd.GeoDataFrame([1], geometry=[bbox_poly], crs="EPSG:4326")
-        area_km2 = gdf_bbox.to_crs("EPSG:3857").area[0] / 1_000_000
-        if area_km2 > 50:
-            st.warning(
-                f"⚠️ La zone d'analyse est très grande ({area_km2:.0f} km²). La recherche des bâtiments peut être longue ou échouer. Essayez de réduire le temps de trajet ou le rayon.")
-    except Exception:
-        pass
+        area_km2 = gdf_bbox.to_crs("EPSG:2154").area[0] / 1_000_000  # Utilisation de Lambert 93 pour la précision
 
+        if area_km2 > 50:
+            st.warning(f"⚠️ Zone trop grande ({area_km2:.1f} km²). Recherche annulée par sécurité.")
+            return gpd.GeoDataFrame()
+    except Exception as e:
+        st.warning(f"⚠️ Impossible de calculer la surface de la zone : {e}")
+
+    # 3. Requête Overpass
     bbox_str = f"{bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
     overpass_url = "http://overpass-api.de/api/interpreter"
 
+    # On cherche 'way' et 'relation' qui ont un tag 'building'
     overpass_query = f"""
-    [out:json][timeout:90];
+    [out:json][timeout:25];
     (
       way["building"]({bbox_str});
+      relation["building"]({bbox_str});
     );
     out geom;
     """
 
     try:
-        response = requests.get(overpass_url, params={'data': overpass_query})
-        response.raise_for_status()
+        response = requests.get(overpass_url, params={'data': overpass_query}, timeout=30)
+
+        if response.status_code != 200:
+            st.error(f"❌ Erreur API Overpass (Code {response.status_code}). Le serveur OSM refuse la connexion.")
+            if response.status_code == 429:
+                st.warning("Trop de requêtes envoyées (Erreur 429). Attendez une minute.")
+            return gpd.GeoDataFrame()
+
         data = response.json()
-    except requests.exceptions.RequestException as e:
-        st.warning(f"Impossible de récupérer les données des bâtiments : {e}")
+
+    except requests.exceptions.Timeout:
+        st.error("❌ Délai d'attente dépassé (Timeout). La zone est peut-être trop dense en bâtiments.")
+        return gpd.GeoDataFrame()
+    except requests.exceptions.ConnectionError:
+        st.error("❌ Erreur de connexion. Vérifiez votre internet ou le pare-feu.")
+        return gpd.GeoDataFrame()
+    except Exception as e:
+        st.error(f"❌ Erreur technique lors de la requête : {e}")
         return gpd.GeoDataFrame()
 
+    # 4. Traitement des données
     geometries = []
     elements = data.get('elements', [])
 
+    if not elements:
+        st.info("ℹ️ La requête a fonctionné, mais OSM ne renvoie aucun bâtiment dans cette zone.")
+        return gpd.GeoDataFrame()
+
     for element in elements:
-        if element['type'] == 'way' and 'geometry' in element:
+        if 'geometry' in element:
             coords = [(node['lon'], node['lat']) for node in element['geometry']]
-            if len(coords) >= 4:
-                geometries.append(shape({'type': 'Polygon', 'coordinates': [coords]}))
+            if len(coords) >= 3:
+                try:
+                    geometries.append(shape({'type': 'Polygon', 'coordinates': [coords]}))
+                except:
+                    pass
 
     if not geometries:
+        st.warning("⚠️ Des données ont été reçues mais aucune géométrie valide n'a pu être construite.")
         return gpd.GeoDataFrame()
 
     gdf = gpd.GeoDataFrame(geometry=geometries, crs="EPSG:4326")
 
+    # 5. Calcul Surface
     try:
         gdf_metric = gdf.to_crs("EPSG:2154")
-        gdf['surface_m2'] = gdf_metric.area.round(1)
+        gdf['surface_m2'] = gdf_metric.area.round(0)
     except Exception as e:
-        st.error(f"Erreur lors du calcul de la surface des bâtiments : {e}")
+        st.error(f"Erreur lors du calcul des surfaces : {e}")
         return gpd.GeoDataFrame()
 
+    # st.success(f"✅ {len(gdf)} bâtiments trouvés !") # (Décommentez pour débugger si besoin)
     return gdf

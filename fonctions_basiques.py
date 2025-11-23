@@ -6,6 +6,7 @@ import streamlit as st
 import numpy as np
 import geopandas as gpd
 import sqlalchemy
+import re
 
 
 # ==============================================
@@ -135,10 +136,8 @@ def find_etablissements_by_siren(_engine, siren):
 def enrichir_dataframe_siren(_engine, df, colonne_id, type_identifiant, only_siege=True):
     """
     Enrichit un DataFrame.
-    - type_identifiant : 'siret' ou 'siren'
-    - only_siege : Si True et mode SIREN, ne garde que les sièges.
-
-    Retourne (df_succes, df_echec_not_found, df_rejet_format)
+    CORRIGÉ : Suppression des colonnes 'codepostaletablissement' et 'libellecommuneetablissement'
+    qui n'existent plus dans la nouvelle structure de base.
     """
     if not _engine:
         st.error("Connexion à la base de données échouée.")
@@ -146,28 +145,24 @@ def enrichir_dataframe_siren(_engine, df, colonne_id, type_identifiant, only_sie
 
     # 1. Nettoyage préliminaire
     try:
-        # Conversion string + nettoyage espaces/points/tabs
         df['clean_id'] = df[colonne_id].astype(str).str.replace(' ', '', regex=False).str.replace('.', '',
                                                                                                   regex=False).str.strip()
-        # Fix pour les cas où Excel a converti en "12345.0"
         df['clean_id'] = df['clean_id'].apply(lambda x: x[:-2] if x.endswith('.0') else x)
     except KeyError:
         st.error(f"Colonne '{colonne_id}' non trouvée dans le fichier.")
         return df, pd.DataFrame(), pd.DataFrame()
 
-    # 2. Validation du format (Longueur + Numérique)
+    # 2. Validation du format
     mask_valid = pd.Series([False] * len(df), index=df.index)
 
     if type_identifiant == "siret":
         mask_valid = (df['clean_id'].str.len() == 14) & (df['clean_id'].str.isdigit())
-        colonne_sql_match = "siret"
 
-        # Requête SIRET : Simple, pas de notion de "siège only" nécessaire car SIRET = Unique
+        # MODIFIÉ : Suppression des colonnes inexistantes
         query_str = """
             SELECT 
                 siret AS join_key,
                 siren, denominationunitelegale, adresse, latitude, longitude,
-                codepostaletablissement, libellecommuneetablissement,
                 activiteprincipaleetablissement, intitules_naf_vf, numero_dep, nom_dep,
                 etablissementsiege
             FROM etablissements WHERE siret IN :liste_ids
@@ -175,16 +170,14 @@ def enrichir_dataframe_siren(_engine, df, colonne_id, type_identifiant, only_sie
 
     elif type_identifiant == "siren":
         mask_valid = (df['clean_id'].str.len() == 9) & (df['clean_id'].str.isdigit())
-        colonne_sql_match = "siren"
 
-        # Requête SIREN : Gestion du filtre Siège
         clause_siege = "AND etablissementsiege = True" if only_siege else ""
 
+        # MODIFIÉ : Suppression des colonnes inexistantes
         query_str = f"""
             SELECT 
                 siren AS join_key,
                 siret, denominationunitelegale, adresse, latitude, longitude,
-                codepostaletablissement, libellecommuneetablissement,
                 activiteprincipaleetablissement, intitules_naf_vf, numero_dep, nom_dep,
                 etablissementsiege
             FROM etablissements 
@@ -196,13 +189,12 @@ def enrichir_dataframe_siren(_engine, df, colonne_id, type_identifiant, only_sie
     if 'clean_id' in df_rejet_format.columns:
         df_rejet_format = df_rejet_format.drop(columns=['clean_id'])
 
-    # Liste des IDs valides à chercher
     ids_valides_uniques = df.loc[mask_valid, 'clean_id'].unique().tolist()
 
     if not ids_valides_uniques:
         return pd.DataFrame(), pd.DataFrame(), df_rejet_format
 
-    # 3. Exécution de la requête
+    # 3. Exécution
     try:
         query = sqlalchemy.text(query_str)
         params = {"liste_ids": tuple(ids_valides_uniques)}
@@ -212,10 +204,9 @@ def enrichir_dataframe_siren(_engine, df, colonne_id, type_identifiant, only_sie
         st.error(f"Erreur SQL : {e}")
         return pd.DataFrame(), pd.DataFrame(), df_rejet_format
 
-    # 4. Fusion (Merge)
+    # 4. Fusion
     df_valide_input = df[mask_valid].copy()
 
-    # Left join pour garder les lignes valides même si non trouvées en base
     df_merged = pd.merge(
         df_valide_input,
         resultats_df,
@@ -224,19 +215,15 @@ def enrichir_dataframe_siren(_engine, df, colonne_id, type_identifiant, only_sie
         how='left'
     )
 
-    # Nettoyage des colonnes de jointure
     cols_to_drop = ['join_key', 'clean_id']
     df_merged = df_merged.drop(columns=[c for c in cols_to_drop if c in df_merged.columns])
 
-    # 5. Séparation Succès vs Non Trouvé
+    # 5. Séparation
     mask_found = df_merged['denominationunitelegale'].notna()
 
-    # --- DataFrame 1 : SUCCÈS ---
     df_succes = df_merged[mask_found].copy()
 
-    # --- DataFrame 2 : INTROUVABLES (Format OK mais inconnus) ---
     df_echec_not_found = df_merged[~mask_found].copy()
-    # On retire les colonnes vides ajoutées par le merge dans les échecs
     cols_resultats = [c for c in resultats_df.columns if c != 'join_key']
     df_echec_not_found = df_echec_not_found.drop(columns=cols_resultats, errors='ignore')
 
@@ -248,8 +235,8 @@ def enrichir_dataframe_siren(_engine, df, colonne_id, type_identifiant, only_sie
 @st.cache_data(show_spinner="Récupération des détails de l'établissement...")
 def get_etab_details_for_concurrence(_engine, siret):
     """
-    Trouve un SIRET et retourne ses infos clés pour une recherche de concurrence,
-    y compris l'intitulé NAF pour la lisibilité.
+    Trouve un SIRET et retourne ses infos clés.
+    ADAPTÉ : Inclut latitude/longitude pour l'affichage du point de référence.
     """
     if not _engine:
         return None
@@ -259,15 +246,17 @@ def get_etab_details_for_concurrence(_engine, siret):
         st.warning("SIRET invalide. Veuillez entrer un numéro à 14 chiffres.", icon="⚠️")
         return None
 
-    # MODIFIÉ : Ajout de 'intitules_naf_vf' pour avoir la description humaine du code NAF
+    # MODIFIÉ : Ajout de 'latitude' et 'longitude'
     query = sqlalchemy.text("""
         SELECT 
             denominationunitelegale, 
             activiteprincipaleetablissement,
-            intitules_naf_vf,
-            libellecommuneetablissement,
+            intitules_naf_vf AS description_naf,
+            adresse,
             numero_dep,
-            nom_dep
+            nom_dep,
+            latitude, 
+            longitude
         FROM etablissements
         WHERE siret = :siret
         LIMIT 1;
@@ -286,54 +275,46 @@ def get_etab_details_for_concurrence(_engine, siret):
         st.error(f"Erreur lors de la requête SIRET : {e}")
         return None
 
+# Fonction utilitaire pour extraire la ville (à mettre en dehors ou dans find_concurrents)
+def extraire_ville_depuis_adresse(adresse_str):
+    if not isinstance(adresse_str, str):
+        return "Ville Inconnue"
+    # Cherche 5 chiffres (CP) et prend ce qui suit
+    match = re.search(r'\b[0-9]{5}\b\s+(.*)', adresse_str)
+    if match:
+        return match.group(1).strip().upper()  # On met en majuscule pour comparer
+    return "Ville Inconnue"
 
 @st.cache_data(show_spinner="Recherche des concurrents...")
-def find_concurrents(_engine, siret_origine, code_naf, scope, scope_value):
+def find_concurrents(_engine, siret_origine, code_naf, scope, scope_value, ville_origine=None):
     """
-    Trouve les concurrents (même NAF) dans une zone donnée (ville, dep).
-    EXCLUT les établissements ayant le même SIREN que l'établissement d'origine (réseau interne).
+    Trouve les concurrents.
+    - scope : 'Département' ou 'Ville'
+    - scope_value : Le numéro de département (toujours utilisé pour la requête SQL initiale)
+    - ville_origine : Le nom de la ville cible (utilisé pour filtrer si scope == 'Ville')
     """
     if not _engine:
         return gpd.GeoDataFrame()
 
-    # On extrait le SIREN (9 premiers chiffres) du SIRET d'origine pour l'exclusion
     siret_origine = str(siret_origine).strip()
     siren_origine = siret_origine[:9]
 
-    # On construit la clause WHERE pour la zone
-    if scope == 'Ville':
-        where_clause = "libellecommuneetablissement = :scope_value"
-    elif scope == 'Département':
-        where_clause = "numero_dep = :scope_value"
-    else:
-        st.error("Scope de recherche non valide.")
-        return gpd.GeoDataFrame()
-
-    # MODIFIÉ :
-    # 1. On récupère 'intitules_naf_vf'
-    # 2. On filtre sur 'siren != :siren_origine' pour exclure le réseau interne
+    # 1. Requête SQL : On tire toujours par département d'abord (c'est indexé, c'est rapide)
     query = sqlalchemy.text(f"""
         SELECT 
-            siret,
-            siren,
-            denominationunitelegale,
-            adresse,
-            latitude,
-            longitude,
-            codepostaletablissement,
-            libellecommuneetablissement,
-            activiteprincipaleetablissement,
-            intitules_naf_vf
+            siret, siren, denominationunitelegale, adresse,
+            latitude, longitude, activiteprincipaleetablissement,
+            intitules_naf_vf AS description_naf
         FROM etablissements
         WHERE 
             activiteprincipaleetablissement = :code_naf AND
-            {where_clause} AND
+            numero_dep = :num_dep AND
             siren != :siren_origine; 
     """)
 
     params = {
         "code_naf": code_naf,
-        "scope_value": scope_value,
+        "num_dep": scope_value,  # scope_value doit être le num_dep
         "siren_origine": siren_origine
     }
 
@@ -342,36 +323,45 @@ def find_concurrents(_engine, siret_origine, code_naf, scope, scope_value):
             results_df = pd.read_sql_query(query, conn, params=params)
 
         if results_df.empty:
-            st.info("Aucun concurrent trouvé dans cette zone avec ce code NAF (hors réseau interne).")
+            st.info("Aucun concurrent trouvé dans ce département.")
             return gpd.GeoDataFrame()
 
-        # On s'assure que lat/lon sont numériques avant de créer le GDF
+        # 2. Enrichissement avec la colonne 'ville' via Regex
+        results_df['ville'] = results_df['adresse'].apply(extraire_ville_depuis_adresse)
+
+        # 3. Filtrage Python si scope == 'Ville'
+        if scope == 'Ville' and ville_origine:
+            # On ne garde que les lignes où la ville extraite correspond à la ville d'origine
+            nb_avant = len(results_df)
+            results_df = results_df[results_df['ville'] == ville_origine.upper()]
+
+            if results_df.empty:
+                st.info(
+                    f"Des concurrents existent dans le département, mais aucun trouvé spécifiquement à {ville_origine}.")
+                return gpd.GeoDataFrame()
+
+        # 4. Conversion Géographique
         results_df['longitude'] = pd.to_numeric(results_df['longitude'], errors='coerce')
         results_df['latitude'] = pd.to_numeric(results_df['latitude'], errors='coerce')
         results_df = results_df.dropna(subset=['longitude', 'latitude'])
 
         if results_df.empty:
-            st.info("Concurrents trouvés mais non géocodés. Affichage impossible.")
+            st.info("Concurrents trouvés mais non géocodés.")
             return gpd.GeoDataFrame()
 
-        # Transformer en GeoDataFrame (Import local pour éviter dépendance circulaire si besoin, ou utiliser l'import global)
-        # Note: Assurez-vous que transfo_geodataframe est bien dispo, sinon importez-le de fonctions_cartographie
         from fonctions_cartographie import transfo_geodataframe
-
         gdf_concurrents = transfo_geodataframe(results_df, "longitude", "latitude")
 
-        # On prépare le GDF pour la carte (similaire à OSM)
         gdf_concurrents['nom_etablissement'] = gdf_concurrents['denominationunitelegale']
         gdf_concurrents['adresse_simplifiee'] = gdf_concurrents['adresse']
         gdf_concurrents['precision_geocodage'] = 'siren_db'
 
-        st.success(f"{len(gdf_concurrents)} concurrent(s) trouvé(s) (hors réseau interne).")
+        st.success(f"{len(gdf_concurrents)} concurrent(s) trouvé(s) dans la zone : {scope}.")
         return gdf_concurrents
 
     except Exception as e:
-        st.error(f"Erreur lors de la recherche de concurrents : {e}")
+        st.error(f"Erreur lors de la recherche : {e}")
         return gpd.GeoDataFrame()
-
 
 # ==============================================
 # MODIFIÉ : Fonction générale (déplacée)
@@ -388,7 +378,6 @@ def transfo_geodataframe(df, longitude_col, latitude_col, crs="EPSG:4326"):
         return gpd.GeoDataFrame()
 
     return gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df[longitude_col], df[latitude_col]), crs=crs)
-
 
 # ==============================================
 # Section chargement des données (INCHANGÉE)
