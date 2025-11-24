@@ -1,0 +1,20 @@
+# Fichier: .streamlit/config.toml
+
+[theme]
+# Doré élégant pour les boutons, sliders et la sélection
+primaryColor = "#C5A065"
+
+# Blanc pur pour le fond principal (meilleure lisibilité)
+backgroundColor = "#FFFFFF"
+
+# Beige/Marron très clair pour la barre latérale (Sidebar)
+secondaryBackgroundColor = "#F4F0EC"
+
+# Noir profond pour le texte
+textColor = "#111111"
+
+# Police moderne
+font = "sans serif"
+
+[server]
+runOnSave = true

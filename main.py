@@ -1,40 +1,46 @@
-# =======================
-# 📦 Imports & Librairies
-# =======================
+# Fichier: main.py
 import streamlit as st
-from interface import personnalisation_page, navigation
-from page_insee import page_insee
-from page_osm import page_osm
-from page_acceuil import page_accueil
 
-# =======================
-# 📁 Chemins des fichiers
-# =======================
+# 1. Configuration Globale (doit être la 1ère commande Streamlit)
+st.set_page_config(
+    page_title="CATMAP Data",
+    page_icon="🌍",
+    layout="wide"
+)
 
-# MODIFIÉ : Suppression des '../' pour correspondre à la nouvelle structure
-path_etablissement = "data/Fichier_final_etablissements_commerces_alimentaire_non_alimentaire.parquet"
-path_centres_departements = "data/Centres_departements.xlsx"
-path_communes_france = "data/Communes_France_Metro.xlsx"
-path_iris_socio = "data/iris_socio_data_final.parquet"
-path_coeff_trafic = "data/coefficient_temps_trajet.xlsx"
+# 2. Définition des Pages (C'est ici qu'on renomme !)
+# On mappe le fichier physique -> vers -> le Nom affiché dans le menu
 
-# MODIFIÉ : Noms des fichiers mis à jour selon vos logs d'erreur
-path_zones_inondables = "data/zones_inondables_v2.parquet"
-path_rga_secheresse = "data/rga_secheresse_v2.parquet"
+page_accueil = st.Page(
+    "pages/00_Home.py",       # Fichier réel
+    title="Accueil",          # Nom affiché dans le menu 👈
+    icon="🏠",                # Icône du menu
+    default=True              # C'est la page par défaut
+)
 
-# =======================
-# 🎨 Personnalisation de la page
-# =======================
-personnalisation_page()
+page_concurrence = st.Page(
+    "pages/01_Analyse_Concurrence.py",
+    title="Analyse Concurrence",
+    icon="📊"
+)
 
-# ===================
-# 🚀 Navigation
-# ===================
-page = navigation()
+page_implantation = st.Page(
+    "pages/02_Zone_Implantation.py",
+    title="Zone d'Implantation",
+    icon="📍"
+)
 
-if page == "accueil":
-    page_accueil()
-elif page == "insee":
-    page_insee(path_etablissement, path_centres_departements)
-elif page == "osm":
-    page_osm(path_communes_france, path_iris_socio, path_coeff_trafic, path_zones_inondables, path_rga_secheresse)
+page_enrichissement = st.Page(
+    "pages/03_Enrichissement_Data.py",
+    title="Enrichissement Data",
+    icon="💾"
+)
+
+# 3. Création de la Navigation
+pg = st.navigation({
+    "Menu Principal": [page_accueil],
+    "Outils d'Analyse": [page_concurrence, page_implantation, page_enrichissement]
+})
+
+# 4. Lancement
+pg.run()
