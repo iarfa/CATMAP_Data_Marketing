@@ -4,6 +4,7 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 from streamlit_folium import st_folium
+import plotly.graph_objects as go
 import time
 
 # Imports des modules métiers
@@ -11,7 +12,9 @@ from fonctions_basiques import (
     charger_communes, extraction_adresse_OSM, choix_centre_OSM,
     charger_donnees_iris_socio, charger_coefficients_trafic, preparer_donnees_socio,
     charger_zones_inondables, charger_donnees_rga,
-    connect_to_db
+    connect_to_db,
+    calculer_stats_anciennete,
+    calculer_comparatif_radar
 )
 from fonctions_cartographie import (
     transfo_geodataframe, creer_carte_enrichie, rechercher_poi_osm
@@ -61,24 +64,38 @@ def _preparer_et_filtrer_gdf_risque(gdf_source, nom_risque, risque_selectionne, 
 
 def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients, gdf_socio_filtre, indicateur,
                                     nom_indicateur, poi_selectionnes_sidebar, gdf_inondations, gdf_rga, ref_lat=None,
-                                    ref_lon=None, ref_nom=None):
+                                    ref_lon=None, ref_nom=None,
+                                    engine=None, code_naf=None, scope=None, scope_value=None, ville_ref=None):
     """
     Affiche les KPIs, la carte et les légendes pour les résultats de concurrence.
-    CORRIGÉ : Affichage propre des enseignes multiples et suppression de la flèche delta.
+    CORRIGÉ : N'affiche l'ancienneté QUE si on est en mode SIREN.
     """
     st.markdown("---")
 
-    # --- BLOC KPIs (AMÉLIORÉ) ---
+    # --- BLOC KPIs ---
     nb_etablissements = len(gdf_resultats)
     zone_info = "Zone Large"
 
-    # Tentative de trouver la zone principale
+    # --- CORRECTION : Détection intelligente du nom de la zone ---
     if 'ville' in gdf_resultats.columns:
         top_ville = gdf_resultats['ville'].mode()
         if not top_ville.empty:
             zone_info = top_ville[0]
     elif 'nom_dep' in gdf_resultats.columns:
-        zone_info = gdf_resultats['nom_dep'].iloc[0]
+        top_dep = gdf_resultats['nom_dep'].mode()
+        if not top_dep.empty:
+            zone_info = top_dep[0]
+    # Fallback si pas de colonne standard (ex: données brutes)
+    elif 'adresse' in gdf_resultats.columns:
+        try:
+            # On tente d'extraire la ville de la première adresse
+            adresse_sample = gdf_resultats['adresse'].iloc[0]
+            import re
+            match = re.search(r'\b[0-9]{5}\b\s+(.*)', str(adresse_sample))
+            if match:
+                zone_info = match.group(1).strip().upper()
+        except:
+            pass
 
     # Calcul intelligent du critère affiché
     valeur_source = "N/A"
@@ -88,16 +105,13 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
     if not gdf_resultats.empty:
         if source_name == "OSM":
             label_source = "Enseigne(s)"
-            # Liste unique des enseignes
             enseignes_uniques = gdf_resultats['nom_etablissement'].unique()
             nb_enseignes = len(enseignes_uniques)
             full_list_tooltip = ", ".join(enseignes_uniques)
 
-            # Affichage "Intelligent" pour éviter le texte coupé
             if nb_enseignes == 1:
                 valeur_source = enseignes_uniques[0]
             else:
-                # Ex: "Carrefour (+2 autres)"
                 valeur_source = f"{enseignes_uniques[0]} (+{nb_enseignes - 1})"
 
         else:  # SIREN
@@ -105,31 +119,43 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
             valeur_source = gdf_resultats.iloc[0]['activiteprincipaleetablissement']
             full_list_tooltip = f"Code activité : {valeur_source}"
 
-    # Affichage des métriques
-    kpi1, kpi2, kpi3 = st.columns(3)
+    # Calcul de l'ancienneté (Uniquement si SIREN et paramètres dispo)
+    age_moyen_display = None
+    age_help = ""
+
+    if source_name == "SIREN" and engine and code_naf:
+        stats_age = calculer_stats_anciennete(engine, code_naf, scope, scope_value, ville_ref)
+        if stats_age:
+            age_moyen_display = f"{stats_age['age_moyen']} ans"
+            age_help = (f"Moyenne : {stats_age['age_moyen']} ans\n"
+                        f"Médiane : {stats_age['age_median']} ans\n"
+                        f"Plus vieux : {stats_age['plus_vieux']} ans")
+
+    # --- Affichage DYNAMIQUE des métriques (3 ou 4 colonnes) ---
+
+    if age_moyen_display:
+        # Mode SIREN (4 colonnes)
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    else:
+        # Mode OSM (3 colonnes, on centre un peu mieux)
+        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi4 = None  # Pas de 4ème colonne
 
     with kpi1:
-        st.metric(
-            label="Établissements Trouvés",
-            value=f"{nb_etablissements}",
-            # SUPPRESSION DU DELTA (plus de flèche)
-            help="Nombre total d'établissements trouvés correspondant à vos critères."
-        )
+        st.metric(label="Établissements Trouvés", value=f"{nb_etablissements}",
+                  help="Nombre total d'établissements trouvés correspondant à vos critères.")
 
     with kpi2:
-        st.metric(
-            label="Zone Principale",
-            value=zone_info,
-            delta_color="off",
-            help="La commune ou le département où se concentrent les résultats."
-        )
+        st.metric(label="Zone Principale", value=zone_info,
+                  help="La commune ou le département où se concentrent les résultats.")
 
     with kpi3:
-        st.metric(
-            label=label_source,
-            value=valeur_source,
-            help=f"Détail : {full_list_tooltip}"  # La liste complète est ici au survol
-        )
+        st.metric(label=label_source, value=valeur_source, help=f"Détail : {full_list_tooltip}")
+
+    # Affichage conditionnel de la 4ème colonne
+    if kpi4 and age_moyen_display:
+        with kpi4:
+            st.metric(label="Ancienneté Moy.", value=age_moyen_display, help=age_help)
 
     st.markdown("---")
     st.subheader(f"Carte Interactive ({source_name})")
@@ -206,11 +232,22 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
 
         if legend_enseignes:
             st.write("**Enseignes / Concurrents**")
-            for nom, color in legend_enseignes.items():
-                if list(legend_enseignes.keys()).index(nom) < 10:
+            # MODIFICATION LÉGENDE COMPACTE
+            nb_items = len(legend_enseignes)
+            if nb_items <= 10:
+                for nom, color in legend_enseignes.items():
                     st.markdown(f'<span style="color:{color}; font-size:22px;">●</span> {nom}', unsafe_allow_html=True)
-            if len(legend_enseignes) > 10:
-                st.write("...")
+            else:
+                st.info(f"{nb_items} acteurs")
+                for i, (nom, color) in enumerate(legend_enseignes.items()):
+                    if i < 5:
+                        st.markdown(f'<span style="color:{color}; font-size:22px;">●</span> {nom}',
+                                    unsafe_allow_html=True)
+                with st.expander("Voir tout"):
+                    for i, (nom, color) in enumerate(legend_enseignes.items()):
+                        if i >= 5:
+                            st.markdown(f'<span style="color:{color}; font-size:18px;">●</span> {nom}',
+                                        unsafe_allow_html=True)
 
         if not gdf_inondations.empty:
             st.markdown("---")
@@ -240,6 +277,97 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
                 st.write(f"**{legend_socio_single['label']}**")
                 st.markdown(f"Val: **{legend_socio_single['value']:,.0f}**")
 
+    # =========================================================
+    # NOUVEAU : ANALYSE DU PROFIL TYPE (RADAR)
+    # =========================================================
+    if not gdf_resultats.empty and 'dict_geodatas' in st.session_state and 'IRIS' in st.session_state['dict_geodatas']:
+
+        st.markdown("---")
+        st.subheader("🧬 Profil Type de la Clientèle Ciblée")
+
+        with st.container(border=True):
+            col_info, col_slider = st.columns([2, 1])
+            with col_info:
+                st.info("Ce radar analyse le profil sociologique moyen autour des concurrents affichés.")
+
+            # CORRECTION : Gestion du slider sans rechargement total (pas de st.form nécessaire ici car tout est recalculé vite)
+            # On met une clé unique pour éviter les conflits
+            with col_slider:
+                rayon_km = st.slider(
+                    "Rayon d'analyse (km) :",
+                    min_value=1, max_value=20, value=3,
+                    key=f"slider_radar_{source_name}"
+                )
+
+            try:
+                # 1. Création de la "Zone des Concurrents" (Union des buffers)
+                gdf_buffers = gdf_resultats.to_crs("EPSG:2154").buffer(rayon_km * 1000)
+                zone_globale_concurrents = gdf_buffers.unary_union  # Fusion
+
+                # Conversion en GeoDataFrame GPS
+                zone_analyse_geom = gpd.GeoDataFrame(geometry=[zone_globale_concurrents], crs="EPSG:2154").to_crs(
+                    "EPSG:4326").geometry.iloc[0]
+
+                # 2. Calcul du Radar
+                dict_geo = st.session_state['dict_geodatas']
+                metriques_concurrence = ["Revenus", "Jeunes", "Actifs", "Seniors", "Cadres", "Ouvriers"]
+
+                # Appel de la fonction
+                df_radar, nom_dept_ref = calculer_comparatif_radar(
+                    dict_geo['IRIS'],
+                    zone_analyse_geom,
+                    metriques_demandees=metriques_concurrence
+                )
+
+                if df_radar is not None and not df_radar.empty:
+                    col_g, col_k = st.columns([1.5, 1])
+                    with col_g:
+                        fig = go.Figure()
+                        # Ref
+                        fig.add_trace(go.Scatterpolar(
+                            r=[100] * len(df_radar),
+                            theta=df_radar['Metrique'],
+                            fill=None,
+                            name=f"Moyenne Locale",
+                            line_color='gray',
+                            line_dash='dot',
+                            hoverinfo='skip'
+                        ))
+                        # Zone
+                        fig.add_trace(go.Scatterpolar(
+                            r=df_radar['Indice_100'],
+                            theta=df_radar['Metrique'],
+                            fill='toself',
+                            name=f'Cible ({rayon_km}km)',
+                            line_color='#E63946'
+                        ))
+
+                        fig.update_layout(
+                            polar=dict(
+                                radialaxis=dict(visible=True, range=[0, max(140, df_radar['Indice_100'].max() + 10)])),
+                            showlegend=True,
+                            height=350,
+                            margin=dict(t=10, b=10, l=40, r=40),
+                            paper_bgcolor="rgba(0,0,0,0)",
+                            plot_bgcolor="rgba(0,0,0,0)"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    with col_k:
+                        st.markdown(f"#### Comparaison vs {nom_dept_ref}")
+                        st.caption("Sur-représentation significative")
+                        for _, row in df_radar.iterrows():
+                            delta = row['Indice_100'] - 100
+                            if delta > 10:
+                                st.metric(f"🎯 {row['Metrique']}", f"+{delta:.0f}%", "Forte")
+                            elif delta < -10:
+                                st.metric(f"🚫 {row['Metrique']}", f"{delta:.0f}%", "Faible")
+                else:
+                    st.warning(f"Pas assez de données IRIS dans un rayon de {rayon_km}km.")
+
+            except Exception as e:
+                st.error(f"Erreur lors du profilage : {e}")
+
 
 # =============================================================================
 # MAIN EXECUTION
@@ -256,7 +384,10 @@ with st.spinner("Chargement des référentiels..."):
     df_iris_base = charger_donnees_iris_socio(PATH_IRIS_SOCIO)
     df_coefficients = charger_coefficients_trafic(PATH_COEFF_TRAFIC)
 
-dict_geodatas = preparer_donnees_socio(df_iris_base, df_communes)
+# Stockage Session (Pour éviter de recharger les IRIS à chaque interaction)
+if 'dict_geodatas' not in st.session_state:
+    st.session_state['dict_geodatas'] = preparer_donnees_socio(df_iris_base, df_communes)
+dict_geodatas = st.session_state['dict_geodatas']
 
 gdf_socio_filtre, indicateur, nom_indicateur, maille = interface_selection_socio(dict_geodatas)
 risque_selectionne, regions_filtrees, departements_filtres = interface_selection_risques(df_communes)
@@ -305,11 +436,27 @@ with subtab_siren:
     ref_lon = None
     ref_nom = "Votre Établissement"
 
+    # Variables pour le calcul de l'ancienneté
+    code_naf = None
+    scope = None
+    scope_value = None
+    ville_ref = None
+
     if st.session_state.get('etab_concurrence_details'):
         details = st.session_state.etab_concurrence_details
         ref_lat = details.get('latitude')
         ref_lon = details.get('longitude')
         ref_nom = details.get('denominationunitelegale', "Votre Établissement")
+
+        # Récupération robuste des paramètres pour le calcul SQL
+        code_naf = details.get('activiteprincipaleetablissement')
+        scope_value = details.get('numero_dep')
+        from fonctions_basiques import extraire_ville_depuis_adresse
+
+        ville_ref = extraire_ville_depuis_adresse(details.get('adresse', ''))
+
+        scope_widget = st.session_state.get('concurrence_scope', '')
+        scope = "Ville" if "Ville" in scope_widget else "Département"
 
     if not gdf_concurrents.empty:
         if st.checkbox("Afficher le détail des concurrents SIREN (tableau)", value=True, key="details_table_siren"):
@@ -320,6 +467,7 @@ with subtab_siren:
             cols_existantes = [col for col in cols_to_show if col in gdf_concurrents.columns]
             st.dataframe(gdf_concurrents[cols_existantes])
 
+        # APPEL AVEC TOUS LES ARGUMENTS POUR LE CALCUL (Mode SIREN = 4 colonnes)
         _afficher_resultats_concurrence(
             gdf_resultats=gdf_concurrents,
             source_name="SIREN",
@@ -332,5 +480,11 @@ with subtab_siren:
             gdf_rga=gdf_rga_a_afficher,
             ref_lat=ref_lat,
             ref_lon=ref_lon,
-            ref_nom=ref_nom
+            ref_nom=ref_nom,
+            # Nouveaux args pour SQL
+            engine=engine,
+            code_naf=code_naf,
+            scope=scope,
+            scope_value=scope_value,
+            ville_ref=ville_ref
         )
