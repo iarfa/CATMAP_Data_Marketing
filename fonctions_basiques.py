@@ -420,12 +420,19 @@ def charger_communes(path_communes):
 
 
 @st.cache_data(show_spinner=False)
-def charger_donnees_iris_socio(path_iris_socio):
-    """Charge le GeoDataFrame des données IRIS depuis un fichier Parquet."""
+@st.cache_data(show_spinner=False)
+def charger_donnees_iris_socio(path):
+    """Charge les données IRIS et convertit en WGS84 (GPS) pour compatibilité."""
     try:
-        return gpd.read_parquet(path_iris_socio)
-    except FileNotFoundError:
-        st.error(f"Fichier de données socio-économiques introuvable au chemin : {path_iris_socio}")
+        gdf = gpd.read_parquet(path)
+        # Conversion forcée en EPSG:4326 (GPS) si ce n'est pas le cas
+        if gdf.crs is not None and gdf.crs.to_string() != "EPSG:4326":
+            gdf = gdf.to_crs("EPSG:4326")
+        elif gdf.crs is None:
+            gdf.set_crs("EPSG:4326", inplace=True)
+        return gdf
+    except Exception as e:
+        print(f"Erreur chargement IRIS: {e}")
         return None
 
 
@@ -642,3 +649,359 @@ def enrichir_donnees_risques_avec_num_dep(gdf_risques, df_communes):
         gdf_enrichi['Num_Dep'] = gdf_enrichi['Num_Dep'].astype(str).str.zfill(2)
 
     return gdf_enrichi
+
+
+# Fichier: fonctions_basiques.py
+# ... (Gardez les imports et les autres fonctions) ...
+
+@st.cache_data(show_spinner="Calcul des statistiques d'ancienneté...")
+def calculer_stats_anciennete(_engine, code_naf, scope, scope_value, ville_origine=None):
+    """
+    Calcule l'âge moyen, min et max des établissements actifs pour un code NAF donné
+    dans une zone géographique (Département ou Ville).
+    """
+    if not _engine:
+        return None
+
+    # 1. Construction de la clause géographique (identique à find_concurrents)
+    # Note : Pour la ville, on doit filtrer en Python ou faire un LIKE en SQL.
+    # Comme la colonne 'ville' n'existe plus, on filtre d'abord large (Département) en SQL.
+
+    query = sqlalchemy.text("""
+        SELECT 
+            datecreationetablissement,
+            adresse
+        FROM etablissements
+        WHERE 
+            activiteprincipaleetablissement = :code_naf AND
+            numero_dep = :num_dep;
+    """)
+
+    params = {
+        "code_naf": code_naf,
+        "num_dep": scope_value  # scope_value est le numéro de département
+    }
+
+    try:
+        with _engine.connect() as conn:
+            df_dates = pd.read_sql_query(query, conn, params=params)
+
+        if df_dates.empty:
+            return None
+
+        # 2. Si le scope est 'Ville', on filtre ici avec notre Regex (comme pour la carte)
+        if scope == 'Ville' and ville_origine:
+            # On réutilise la logique d'extraction (assurez-vous d'avoir importé re)
+            df_dates['ville_extract'] = df_dates['adresse'].apply(extraire_ville_depuis_adresse)
+            df_dates = df_dates[df_dates['ville_extract'] == ville_origine.upper()]
+
+            if df_dates.empty:
+                return None
+
+        # 3. Calcul de l'âge
+        # La date est en string 'YYYY-MM-DD', on convertit en datetime
+        df_dates['date_creation'] = pd.to_datetime(df_dates['datecreationetablissement'], errors='coerce')
+        df_dates = df_dates.dropna(subset=['date_creation'])
+
+        # Calcul de l'âge en années (Date du jour - Date création) / 365.25
+        now = pd.Timestamp.now()
+        df_dates['age_annees'] = (now - df_dates['date_creation']).dt.days / 365.25
+
+        # 4. Agrégation
+        stats = {
+            "age_moyen": round(df_dates['age_annees'].mean(), 1),
+            "age_median": round(df_dates['age_annees'].median(), 1),
+            "plus_vieux": round(df_dates['age_annees'].max(), 1),
+            "plus_recent": round(df_dates['age_annees'].min(), 1),
+            "nb_etablissements_dates": len(df_dates)
+        }
+
+        return stats
+
+    except Exception as e:
+        print(f"Erreur calcul ancienneté : {e}")
+        return None
+
+
+@st.cache_data(show_spinner="Chargement des valeurs foncières (DVF)...")
+def charger_donnees_dvf(path_parquet):
+    """
+    Charge le fichier Parquet DVF.
+    Convertit la date pour le filtrage.
+    """
+    try:
+        df = pd.read_parquet(path_parquet)
+
+        # Vérification colonnes
+        required = ['latitude', 'longitude', 'prix_m2', 'type_local', 'date_mutation', 'valeur_fonciere',
+                    'surface_reelle_bati']
+        if not all(c in df.columns for c in required):
+            st.error("Colonnes DVF manquantes.")
+            return pd.DataFrame()
+
+        # Conversion Date pour le filtre temporel
+        if not pd.api.types.is_datetime64_any_dtype(df['date_mutation']):
+            df['date_mutation'] = pd.to_datetime(df['date_mutation'], errors='coerce')
+
+        # Extraction Année pour faciliter les filtres
+        df['annee'] = df['date_mutation'].dt.year
+
+        return df
+    except FileNotFoundError:
+        st.warning(f"Fichier DVF introuvable : {path_parquet}")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erreur chargement DVF : {e}")
+        return pd.DataFrame()
+
+
+def calculer_comparatif_radar(gdf_iris, zone_geom, metriques_demandees=None, df_communes_ref=None):
+    """
+    Calcule les indicateurs radar avec choix des métriques et nom du département.
+
+    Args:
+        metriques_demandees (list): Liste de clés de configuration (ex: ['Revenus', 'Cadres']).
+                                    Si None, utilise tout.
+        df_communes_ref (DataFrame): Pour traduire le code dept (33) en nom (Gironde).
+
+    Returns:
+        tuple: (DataFrame des stats, String nom_departement)
+    """
+    # 1. Sécurités de base
+    if gdf_iris is None or gdf_iris.empty or zone_geom is None:
+        return None, "Données Manquantes"
+
+    # --- CONFIGURATION CENTRALE DES MÉTRIQUES ---
+    # Format : "Clé": ("Label Affiché", Colonne_Num, Colonne_Denom, Is_Revenu)
+    CONFIG_METRIQUES_DB = {
+        "Revenus": ("Revenus (Médian)", "Revenu_median", None, True),
+        "Jeunes": ("Jeunes (<25 ans)", "Pop_15_24_ans", "Population_totale", False),
+        "Actifs": ("Actifs (25-54 ans)", "Pop_25_54_ans", "Population_totale", False),
+        "Seniors": ("Seniors (>55 ans)", ["Pop_55_79_ans", "Pop_80_ans_plus"], "Population_totale", False),
+        "Cadres": ("Cadres (CSP+)", "Menages_cadres_prof_intelectuelles_CS3", "Nb_menages_total", False),
+        "Ouvriers": ("Ouvriers (CSP-)", "Menages_ouvriers_CS6", "Nb_menages_total", False),
+        "Familles": ("Ménages avec Enfants", "Menages_couple_avec_enfant", "Nb_menages_total", False),
+        "Monoparental": ("Familles Monoparentales", "Menages_monoparental", "Nb_menages_total", False),
+        "Retraités": ("Retraités", "Menages_retraites_CS7", "Nb_menages_total", False)
+    }
+
+    # Si aucune sélection (premier chargement), on prend un set par défaut
+    if not metriques_demandees:
+        metriques_demandees = ["Revenus", "Jeunes", "Actifs", "Seniors", "Cadres"]
+
+    # --- 2. INTERSECTION SPATIALE (Moteur Géographique) ---
+    try:
+        # Création GeoDataFrame pour la zone
+        gdf_zone_analyse = gpd.GeoDataFrame({'geometry': [zone_geom]}, crs="EPSG:4326")
+
+        # Alignement CRS (Projection GPS)
+        gdf_iris_work = gdf_iris.copy()
+        if gdf_iris_work.crs is None:
+            gdf_iris_work.set_crs("EPSG:4326", inplace=True)
+        elif gdf_iris_work.crs.to_string() != "EPSG:4326":
+            gdf_iris_work = gdf_iris_work.to_crs("EPSG:4326")
+
+        # Jointure Spatiale (On garde les IRIS qui touchent la zone)
+        iris_zone = gpd.sjoin(gdf_iris_work, gdf_zone_analyse, how="inner", predicate="intersects")
+
+        if iris_zone.empty:
+            return None, "Hors Zone"
+
+    except Exception as e:
+        print(f"Erreur Radar: {e}")
+        return None, "Erreur Géom"
+
+    # --- 3. IDENTIFICATION DU DÉPARTEMENT ---
+    # Création de la colonne CODE_DEPT si absente
+    if 'CODE_DEPT' not in iris_zone.columns:
+        iris_zone['CODE_DEPT'] = iris_zone['IRIS'].astype(str).str[:2]
+        gdf_iris_work['CODE_DEPT'] = gdf_iris_work['IRIS'].astype(str).str[:2]
+
+    # Trouver le département majoritaire
+    if iris_zone['CODE_DEPT'].mode().empty:
+        return None, "Inconnu"
+
+    code_dept_ref = iris_zone['CODE_DEPT'].mode()[0]
+
+    # Traduction Code -> Nom (ex: 33 -> Gironde)
+    nom_dept_display = f"Département {code_dept_ref}"
+    if df_communes_ref is not None and not df_communes_ref.empty:
+        # On cherche le nom dans le référentiel commune chargé
+        # On s'assure que le type (str/int) correspond
+        df_communes_ref['Num_Dep'] = df_communes_ref['Num_Dep'].astype(str)
+        match = df_communes_ref[df_communes_ref['Num_Dep'] == str(code_dept_ref)]
+        if not match.empty:
+            nom_reel = match.iloc[0]['Nom_Dep']
+            nom_dept_display = f"{nom_reel} ({code_dept_ref})"
+
+    # Création du DataFrame de référence (Tout le département)
+    df_dept = gdf_iris_work[gdf_iris_work['CODE_DEPT'] == code_dept_ref].copy()
+
+    # --- 4. CALCUL DES RATIOS (Dynamique) ---
+    stats = []
+
+    for key in metriques_demandees:
+        if key not in CONFIG_METRIQUES_DB:
+            continue
+
+        label, num_col, den_col, is_revenu = CONFIG_METRIQUES_DB[key]
+        vals = {}
+
+        for scope_name, df_scope in [("Zone", iris_zone), ("Departement", df_dept)]:
+            valeur = 0
+
+            # A. Cas REVENUS (Moyenne)
+            if is_revenu:
+                if num_col in df_scope.columns:
+                    valeur = df_scope[num_col].mean()
+
+            # B. Cas RATIOS (%)
+            else:
+                # B1. Calcul Dénominateur
+                total_den = 0
+                if den_col and den_col in df_scope.columns:
+                    total_den = df_scope[den_col].sum()
+                elif den_col == "Population_totale":
+                    # Reconstruction de secours si colonne absente
+                    cols_pop = ['Pop_15_24_ans', 'Pop_25_54_ans', 'Pop_55_79_ans', 'Pop_80_ans_plus']
+                    cols_exist = [c for c in cols_pop if c in df_scope.columns]
+                    total_den = df_scope[cols_exist].sum().sum()
+
+                # B2. Calcul Numérateur
+                total_num = 0
+                if isinstance(num_col, list):
+                    # Somme de plusieurs colonnes (ex: Seniors)
+                    cols_ok = [c for c in num_col if c in df_scope.columns]
+                    total_num = df_scope[cols_ok].sum().sum()
+                else:
+                    if num_col in df_scope.columns:
+                        total_num = df_scope[num_col].sum()
+
+                # B3. Pourcentage
+                if total_den > 0:
+                    valeur = (total_num / total_den) * 100
+
+            vals[scope_name] = valeur
+
+        # Calcul Indice 100
+        val_z = vals["Zone"]
+        val_d = vals["Departement"]
+        indice = 100
+        if pd.notnull(val_d) and val_d > 0:
+            indice = (val_z / val_d) * 100
+
+        stats.append({
+            'Metrique': label,
+            'Zone': val_z if pd.notnull(val_z) else 0,
+            'Departement': val_d if pd.notnull(val_d) else 0,
+            'Indice_100': indice if pd.notnull(indice) else 0
+        })
+
+    return pd.DataFrame(stats), nom_dept_display
+
+
+def calculer_cannibalisation(zone_analysee_geom, gdf_reseau_existant, buffer_existant_m=2000):
+    """
+    Calcule le taux de chevauchement entre la nouvelle zone et le réseau existant.
+    """
+    if zone_analysee_geom is None or gdf_reseau_existant.empty:
+        return 0, None
+
+    # 1. On crée les zones du réseau existant (Buffers simples pour aller vite)
+    # Idéalement, on ferait des isochrones, mais le buffer est un excellent proxy rapide
+    try:
+        gdf_reseau_buffers = gdf_reseau_existant.to_crs("EPSG:2154").buffer(buffer_existant_m)
+        zone_reseau_union = gdf_reseau_buffers.unary_union
+
+        # On repasse en GPS pour l'intersection avec la zone analysée (si elle est en GPS)
+        # Attention : zone_analysee_geom doit être un objet Shapely, on le met dans un GDF pour gérer les CRS
+        gdf_zone_new = gpd.GeoDataFrame({'geometry': [zone_analysee_geom]}, crs="EPSG:4326").to_crs("EPSG:2154")
+        area_new_total = gdf_zone_new.area.iloc[0]
+
+        # 2. Calcul de l'intersection (Recouvrement)
+        # Intersection géométrique
+        intersection = gdf_zone_new.intersection(zone_reseau_union)
+
+        if intersection.is_empty.all():
+            return 0, None
+
+        area_intersection = intersection.area.iloc[0]
+
+        # 3. Ratio
+        ratio_cannibalisation = (area_intersection / area_new_total) * 100
+
+        return ratio_cannibalisation, intersection.to_crs("EPSG:4326").iloc[0]
+
+    except Exception as e:
+        print(f"Erreur Cannibalisation : {e}")
+        return 0, None
+
+
+def calculer_score_global(kpis_socio, kpis_immo, kpis_risques, kpis_concurrence):
+    """
+    Génère un score sur 100 basé sur 4 piliers.
+    Les inputs sont des dictionnaires ou des valeurs simples.
+    """
+    score_total = 0
+    details = {}
+
+    # --- PILIER 1 : POTENTIEL (Population & Argent) ---
+    # On vise une population dense et avec du pouvoir d'achat
+    pop = kpis_socio.get('population', 0)
+    revenu = kpis_socio.get('revenu_median', 0)
+
+    # Logique : Plus c'est haut, mieux c'est, mais avec un plafond (saturation)
+    score_pop = min(pop / 5000, 1) * 20  # Max 20 pts si > 5000 hab
+    score_rev = min(revenu / 25000, 1) * 20  # Max 20 pts si > 25k€
+
+    details['Potentiel'] = round(score_pop + score_rev, 1)
+    score_total += details['Potentiel']
+
+    # --- PILIER 2 : DYNAMISME (Immo & POI) ---
+    nb_ventes = kpis_immo.get('nb_ventes', 0)
+    nb_poi = kpis_socio.get('nb_poi', 0)  # Si vous avez compté les POI
+
+    score_immo = min(nb_ventes / 20, 1) * 15  # Max 15 pts si > 20 ventes
+    score_poi = min(nb_poi / 5, 1) * 15  # Max 15 pts si > 5 POI majeurs
+
+    details['Dynamisme'] = round(score_immo + score_poi, 1)
+    score_total += details['Dynamisme']
+
+    # --- PILIER 3 : RISQUES (Malus) ---
+    # Ici on part de 15 et on enlève des points
+    score_risk = 15
+    if kpis_risques.get('inondation'): score_risk -= 10
+    if kpis_risques.get('secheresse'): score_risk -= 5
+    score_risk = max(0, score_risk)
+
+    details['Sûreté'] = score_risk
+    score_total += score_risk
+
+    # --- PILIER 4 : CONCURRENCE (Opportunité ou Saturation) ---
+    # C'est subtil : un peu de concurrence = bon signe (zone commerciale). Trop = mauvais.
+    nb_concurrents = kpis_concurrence.get('nb_concurrents', 0)
+
+    if nb_concurrents == 0:
+        score_conc = 5  # Bof, zone déserte ?
+    elif 1 <= nb_concurrents <= 3:
+        score_conc = 15  # Top ! Zone active mais prenable
+    else:
+        score_conc = 5  # Saturé
+
+    details['Concurrence'] = score_conc
+    score_total += score_conc
+
+    # Note Finale
+    note_finale = min(100, round(score_total, 0))
+
+    # Label
+    if note_finale >= 80:
+        label = "A+ (Excellent)"
+    elif note_finale >= 60:
+        label = "B (Bon)"
+    elif note_finale >= 40:
+        label = "C (Moyen)"
+    else:
+        label = "D (Risqué)"
+
+    return note_finale, label, details
