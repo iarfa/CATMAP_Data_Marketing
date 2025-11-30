@@ -40,7 +40,6 @@ def connect_to_db():
             "Vérifiez vos secrets (DB_USER, DB_PASS...) et que le conteneur Docker 'bdd_sirene_postgis' est bien lancé.")
         return None
 
-
 # ==================================================================
 # MODIFIÉ : Logique de recherche SIRET (P1, P2)
 # ==================================================================
@@ -82,7 +81,6 @@ def find_etablissement_by_siret(_engine, siret):
     except Exception as e:
         st.error(f"Erreur lors de la requête SIRET : {e}")
         return None
-
 
 @st.cache_data(show_spinner="Recherche du SIREN dans la base de données...")
 def find_etablissements_by_siren(_engine, siren):
@@ -392,7 +390,6 @@ def charger_etablissements(path_etablissement):
         st.error(f"Fichier des établissements introuvable : {path_etablissement}")
         return pd.DataFrame()
 
-
 @st.cache_data(show_spinner=False)
 def charger_centres_departements(path_centres_dpt):
     """Charge les données des centres de départements depuis un fichier Excel."""
@@ -401,7 +398,6 @@ def charger_centres_departements(path_centres_dpt):
     except FileNotFoundError:
         st.error(f"Fichier des centres de départements introuvable : {path_centres_dpt}")
         return pd.DataFrame()
-
 
 @st.cache_data(show_spinner=False)
 def charger_communes(path_communes):
@@ -418,8 +414,6 @@ def charger_communes(path_communes):
         st.error(f"Fichier des communes introuvable : {path_communes}")
         return pd.DataFrame()
 
-
-@st.cache_data(show_spinner=False)
 @st.cache_data(show_spinner=False)
 def charger_donnees_iris_socio(path):
     """Charge les données IRIS et convertit en WGS84 (GPS) pour compatibilité."""
@@ -435,7 +429,6 @@ def charger_donnees_iris_socio(path):
         print(f"Erreur chargement IRIS: {e}")
         return None
 
-
 @st.cache_data(show_spinner=False)
 def charger_coefficients_trafic(path_coeff_trafic):
     """Charge la table des coefficients de trafic par ville."""
@@ -445,7 +438,6 @@ def charger_coefficients_trafic(path_coeff_trafic):
         st.warning(
             f"Fichier des coefficients de trafic introuvable : {path_coeff_trafic}. Le trafic ne sera pas simulé.")
         return pd.DataFrame(columns=['ville', 'coefficient'])
-
 
 @st.cache_data(show_spinner="Chargement des zones inondables...")
 def charger_zones_inondables(path_parquet):
@@ -459,7 +451,6 @@ def charger_zones_inondables(path_parquet):
         st.warning(f"Fichier des zones inondables introuvable ou illisible : {e}. La fonctionnalité sera désactivée.")
         return gpd.GeoDataFrame()
 
-
 @st.cache_data(show_spinner="Chargement des données de sécheresse (RGA)...")
 def charger_donnees_rga(path_parquet):
     """
@@ -471,7 +462,6 @@ def charger_donnees_rga(path_parquet):
     except Exception as e:
         st.warning(f"Fichier des données RGA introuvable ou illisible : {e}. La fonctionnalité sera désactivée.")
         return gpd.GeoDataFrame()
-
 
 # ==============================================
 # Fonctions pour la page OSM (INCHANGÉES)
@@ -487,7 +477,6 @@ def extraction_adresse_OSM(ligne_etab):
         adresse_simp = ", ".join(adresse_ini[:3])
         precision_geocodage = "voie"
     return pd.Series([adresse_simp, precision_geocodage])
-
 
 def choix_centre_OSM(data):
     """Laisse à l'utilisateur le choix de la ville pour centrer la carte."""
@@ -512,7 +501,6 @@ def choix_centre_OSM(data):
     lon_centre = coordonnees_centre["longitude"].iloc[0]
     lat_centre = coordonnees_centre["latitude"].iloc[0]
     return lat_centre, lon_centre
-
 
 @st.cache_data(show_spinner=False)
 def preparer_donnees_socio(_df_iris_base, _df_communes_france):
@@ -622,7 +610,6 @@ def preparer_donnees_socio(_df_iris_base, _df_communes_france):
 
     return {"IRIS": df, "Commune": df_commune, "Département": df_departement}
 
-
 def enrichir_donnees_risques_avec_num_dep(gdf_risques, df_communes):
     """
     Enrichit un GeoDataFrame de risques (inondation, RGA, etc.) avec le numéro de département.
@@ -649,10 +636,6 @@ def enrichir_donnees_risques_avec_num_dep(gdf_risques, df_communes):
         gdf_enrichi['Num_Dep'] = gdf_enrichi['Num_Dep'].astype(str).str.zfill(2)
 
     return gdf_enrichi
-
-
-# Fichier: fonctions_basiques.py
-# ... (Gardez les imports et les autres fonctions) ...
 
 @st.cache_data(show_spinner="Calcul des statistiques d'ancienneté...")
 def calculer_stats_anciennete(_engine, code_naf, scope, scope_value, ville_origine=None):
@@ -722,7 +705,6 @@ def calculer_stats_anciennete(_engine, code_naf, scope, scope_value, ville_origi
         print(f"Erreur calcul ancienneté : {e}")
         return None
 
-
 @st.cache_data(show_spinner="Chargement des valeurs foncières (DVF)...")
 def charger_donnees_dvf(path_parquet):
     """
@@ -753,7 +735,6 @@ def charger_donnees_dvf(path_parquet):
     except Exception as e:
         st.error(f"Erreur chargement DVF : {e}")
         return pd.DataFrame()
-
 
 def calculer_comparatif_radar(gdf_iris, zone_geom, metriques_demandees=None, df_communes_ref=None):
     """
@@ -899,7 +880,6 @@ def calculer_comparatif_radar(gdf_iris, zone_geom, metriques_demandees=None, df_
 
     return pd.DataFrame(stats), nom_dept_display
 
-
 def calculer_cannibalisation(zone_analysee_geom, gdf_reseau_existant, buffer_existant_m=2000):
     """
     Calcule le taux de chevauchement entre la nouvelle zone et le réseau existant.
@@ -935,7 +915,6 @@ def calculer_cannibalisation(zone_analysee_geom, gdf_reseau_existant, buffer_exi
     except Exception as e:
         print(f"Erreur Cannibalisation : {e}")
         return 0, None
-
 
 def calculer_score_global(kpis_socio, kpis_immo, kpis_risques, kpis_concurrence):
     """
@@ -1005,3 +984,211 @@ def calculer_score_global(kpis_socio, kpis_immo, kpis_risques, kpis_concurrence)
         label = "D (Risqué)"
 
     return note_finale, label, details
+
+def auditer_risque_batiments(gdf_batiments, gdf_risque, nom_risque="Risque", colonne_niveau="NIVEAU_ALEA"):
+    """
+    Croise les bâtiments (OSM) avec une couche de risque (Inondation/Argile).
+    Retourne le GDF des bâtiments enrichi avec le niveau de risque et le % de surface impactée.
+    """
+    if gdf_batiments.empty or gdf_risque.empty:
+        return gdf_batiments
+
+    try:
+        # 1. Standardisation CRS (Lambert 93 pour calculs métriques précis)
+        bats = gdf_batiments.to_crs("EPSG:2154").copy()
+        risques = gdf_risque.to_crs("EPSG:2154").copy()
+
+        # ID unique temporaire pour le regroupement (si pas d'ID unique OSM)
+        if 'id' not in bats.columns:
+            bats['bat_id'] = range(len(bats))
+        else:
+            bats['bat_id'] = bats['id']
+
+        bats['surface_totale'] = bats.area
+
+        # 2. Intersection (On découpe les bâtiments par les zones de risque)
+        # overlay 'intersection' ne garde que la partie commune
+        intersection = gpd.overlay(bats, risques, how='intersection')
+
+        if intersection.empty:
+            return gdf_batiments
+
+        # 3. Calcul de l'impact
+        intersection['surface_touchee'] = intersection.area
+
+        # On garde le risque le plus fort pour chaque bâtiment
+        # On regroupe par bat_id au cas où un bâtiment touche plusieurs zones
+        resume_risque = intersection.groupby('bat_id').agg({
+            colonne_niveau: 'first',  # Idéalement, prendre le max si hiérarchie connue
+            'surface_touchee': 'sum'
+        }).reset_index()
+
+        # 4. Fusion avec les bâtiments originaux
+        bats_enrichis = bats.merge(resume_risque, on='bat_id', how='left')
+
+        # Calcul du % impacté
+        bats_enrichis['ratio_risque'] = (
+                    bats_enrichis['surface_touchee'] / bats_enrichis['surface_totale'] * 100).fillna(0)
+
+        # Création des drapeaux (Booléens)
+        col_has = f'has_{nom_risque}'
+        col_niv = f'niveau_{nom_risque}'
+
+        bats_enrichis[col_has] = bats_enrichis['ratio_risque'] > 1  # Seuil de tolérance 1%
+        bats_enrichis[col_niv] = bats_enrichis[colonne_niveau].fillna("Aucun")
+
+        # Nettoyage
+        cols_to_drop = ['surface_touchee', colonne_niveau]
+        bats_enrichis = bats_enrichis.drop(columns=[c for c in cols_to_drop if c in bats_enrichis.columns])
+
+        return bats_enrichis.to_crs("EPSG:4326")
+
+    except Exception as e:
+        print(f"Erreur Audit {nom_risque} : {e}")
+        return gdf_batiments
+
+def estimer_valeur_portefeuille(df, cout_m2_defaut=2000, valeur_forfaitaire=300000):
+    """
+    HYPOTHÈSE 1 : VALORISATION (TIV)
+    Calcule la valeur exposée (Total Insured Value) selon la méthode Waterfall :
+    1. Valeur Réelle > 2. Surface * Coût Construction > 3. Forfait Moyen
+    """
+    df = df.copy()
+
+    # Nettoyage des colonnes (minuscules)
+    df.columns = [c.lower().strip() for c in df.columns]
+
+    # Init colonnes
+    if 'valeur_assuree' not in df.columns: df['valeur_assuree'] = 0.0
+    if 'surface' not in df.columns: df['surface'] = 0.0
+
+    df['mode_estimation'] = "Déclaré"
+
+    for idx, row in df.iterrows():
+        val = pd.to_numeric(row['valeur_assuree'], errors='coerce')
+        surf = pd.to_numeric(row['surface'], errors='coerce')
+
+        # Cas 1 : Valeur déclarée (Prioritaire)
+        if pd.notnull(val) and val > 0:
+            df.at[idx, 'valeur_assuree'] = val
+            df.at[idx, 'mode_estimation'] = "Réelle (Déclarée)"
+
+        # Cas 2 : Estimation par Surface (Proxy Coût Construction)
+        elif pd.notnull(surf) and surf > 0:
+            # Hypothèse : Coût de reconstruction à neuf
+            df.at[idx, 'valeur_assuree'] = surf * cout_m2_defaut
+            df.at[idx, 'mode_estimation'] = f"Calculée ({cout_m2_defaut}€/m²)"
+
+        # Cas 3 : Forfaitaire (Dernier recours)
+        else:
+            # Hypothèse : Valeur moyenne d'un actif TPE/PME standard
+            df.at[idx, 'valeur_assuree'] = valeur_forfaitaire
+            df.at[idx, 'mode_estimation'] = "Forfaitaire (Proxy)"
+
+    return df
+
+
+def _get_coef_vulnerabilite(naf_code):
+    """
+    PRIORITÉ 2 : Helper pour le coefficient sectoriel.
+    """
+    if not isinstance(naf_code, str): return 1.0
+    naf = naf_code.strip().upper()
+
+    # Industrie / Construction (Vulnérable)
+    if naf.startswith(('C', 'F')) or (naf[:2].isdigit() and 10 <= int(naf[:2]) <= 43):
+        return 1.5
+        # Commerce / Logistique (Moyen)
+    if naf.startswith(('G', 'H', 'I')) or (naf[:2].isdigit() and 45 <= int(naf[:2]) <= 56):
+        return 1.2
+    # Services (Résilient)
+    return 0.8
+
+
+def calculer_pertes_sectorielles(gdf, scenario, col_naf=None):
+    """
+    PRIORITÉ 2 : Calcul des pertes avec pondération NAF.
+    Remplace l'ancienne fonction 'calculer_pertes_financieres'.
+    """
+    gdf = gdf.copy()
+
+    # 1. Matrice de Dommages Physique (Baseline)
+    taux_inond = {'fort': 0.20, 'moyen': 0.05, 'faible': 0.0}
+    taux_rga = {'fort': 0.10, 'moyen': 0.02, 'faible': 0.0}
+
+    # 2. Ajustement Scénario (Facteur d'aggravation)
+    facteur_climat = 1.0
+    if "RCP 4.5" in scenario:
+        facteur_climat = 1.2
+    elif "RCP 8.5" in scenario:
+        facteur_climat = 1.5
+
+    pertes = []
+    coefs = []
+
+    for idx, row in gdf.iterrows():
+        val = row.get('valeur_assuree', 0)
+
+        # A. Coefficient Secteur
+        coef_sec = 1.0
+        if col_naf and col_naf in row and pd.notnull(row[col_naf]):
+            coef_sec = _get_coef_vulnerabilite(str(row[col_naf]))
+        coefs.append(coef_sec)
+
+        # B. Taux Physique Inondation
+        alea_i = str(row.get('alea_inondation', 'nan')).lower()
+        t_i = 0
+        if 'fort' in alea_i:
+            t_i = taux_inond['fort']
+        elif 'moyen' in alea_i:
+            t_i = taux_inond['moyen']
+        elif 'faible' in alea_i:
+            t_i = 0.01
+
+        # C. Taux Physique RGA
+        alea_r = str(row.get('alea_secheresse', 'nan')).lower()
+        t_r = 0
+        if 'fort' in alea_r:
+            t_r = taux_rga['fort']
+        elif 'moyen' in alea_r:
+            t_r = taux_rga['moyen']
+
+        # D. Calcul Final (Pire cas * Climat * Secteur)
+        taux_final = min(max(t_i, t_r) * facteur_climat * coef_sec, 1.0)
+        pertes.append(val * taux_final)
+
+    gdf['perte_estimee'] = pertes
+    gdf['coef_vulnerabilite'] = coefs
+    return gdf
+
+
+def estimer_empreinte_carbone(df, col_naf=None):
+    """
+    PRIORITÉ 4 : Estimation Carbone (Transition).
+    """
+    df = df.copy()
+
+    # Intensités (tCO2e / k€ actif)
+    INTENSITES = {'A': 0.8, 'B': 0.9, 'C': 0.5, 'D': 1.2, 'E': 0.6, 'F': 0.4, 'H': 0.5, 'J': 0.05, 'K': 0.02, 'M': 0.03}
+    defaut = 0.15
+
+    carbones, labels = [], []
+
+    for idx, row in df.iterrows():
+        naf = str(row.get(col_naf, '')).strip().upper() if col_naf else ''
+        code = naf[0] if len(naf) > 0 and naf[0].isalpha() else 'M'
+
+        facteur = INTENSITES.get(code, defaut)
+        emission = (row['valeur_assuree'] / 1000) * facteur
+
+        carbones.append(emission)
+        if facteur > 0.6:
+            labels.append("🟤 Brun (Intensif)")
+        elif facteur > 0.2:
+            labels.append("🟠 Mixte")
+        else:
+            labels.append("🟢 Vert (Bas Carbone)")
+
+    df['emission_tco2'] = carbones
+    df['categorie_transition'] = labels
+    return df

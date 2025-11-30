@@ -2,6 +2,8 @@
 import streamlit as st
 import pandas as pd
 from config import POI_CONFIG
+
+# Imports des fonctions backend nécessaires
 from fonctions_cartographie import recherche_etablissements_osm, geocoder_adresse_nominatim_ui
 from fonctions_basiques import (
     find_etablissement_by_siret,
@@ -44,105 +46,136 @@ INDICATEURS_CONFIG = {
 
 
 # ==============================================
-# 1. FONCTIONS SIDEBAR (OPTIMISÉES "CLEAN")
+# 1. FONCTIONS SIDEBAR (FILTRES)
 # ==============================================
 
 def interface_selection_socio(dict_geodatas):
-    """Affiche l'interface de sélection socio-économique dans un EXPANDER."""
-    gdf_socio_filtre, colonne_a_afficher, nom_indicateur_final, maille_choisie = None, None, None, None
+    """
+    Sélecteur pour la couche socio-démographique.
+    Utilisé par Page 01 et Page 02.
+    """
+    st.markdown("### 👥 Socio-Démographie")
 
-    # MODIFIÉ : Utilisation d'un expander pour cacher les détails par défaut
-    with st.sidebar.expander("📊 Données Socio-Démographiques", expanded=False):
-        activer_socio = st.toggle("Activer la couche Socio", value=False)
+    # On ajoute une option vide pour ne rien afficher par défaut
+    options = ["Aucun"] + [v['display'] for v in INDICATEURS_CONFIG.values()]
+    # Clé unique pour éviter les conflits entre pages
+    choix = st.selectbox("Indicateur :", options, index=0, key="sel_socio_main_interface")
 
-        if activer_socio:
-            nom_affiche_choisi = st.selectbox("Indicateur :", [v['display'] for v in INDICATEURS_CONFIG.values()])
-            config_choisie = next(c for c in INDICATEURS_CONFIG.values() if c['display'] == nom_affiche_choisi)
-            colonne_a_afficher, nom_indicateur_final = config_choisie['raw'], config_choisie['display']
+    if choix == "Aucun":
+        return None, None, None, None
 
-            if config_choisie['pct'] is not None:
-                type_affichage = st.radio("Format :", ("Valeur absolue", "Pourcentage (%)"), horizontal=True)
-                if type_affichage == "Pourcentage (%)":
-                    colonne_a_afficher, nom_indicateur_final = config_choisie['pct'], f"{config_choisie['display']} (%)"
+    config = next(c for c in INDICATEURS_CONFIG.values() if c['display'] == choix)
+    colonne, label = config['raw'], config['display']
 
-            maille_disponible = ['IRIS', 'Commune', 'Département']
-            maille_choisie = st.radio("Maillage :", maille_disponible, index=1, horizontal=True)
-            gdf_a_afficher = dict_geodatas.get(maille_choisie)
+    # Option pourcentage si disponible
+    if config['pct']:
+        c1, c2 = st.columns([3, 1])
+        with c2:
+            is_pct = st.toggle("%", value=True, help="Afficher en pourcentage", key="tog_pct_socio_interface")
+        if is_pct:
+            colonne, label = config['pct'], f"{config['display']} (%)"
 
-            if gdf_a_afficher is not None:
-                df_deps = dict_geodatas.get('Département')
-                if df_deps is not None:
-                    df_deps['label'] = df_deps['CODE_DEPT'] + ' - ' + df_deps['NOM_COM']
-                    deps_selectionnes = st.multiselect("Filtrer (Optionnel) :",
-                                                       options=df_deps['label'].unique().tolist())
-                    if deps_selectionnes:
-                        codes_deps = [d.split(' - ')[0] for d in deps_selectionnes]
-                        gdf_socio_filtre = gdf_a_afficher[gdf_a_afficher['CODE_DEPT'].isin(codes_deps)]
-                    else:
-                        gdf_socio_filtre = gdf_a_afficher  # On retourne tout si pas de filtre
-            else:
-                st.error(f"Données non disponibles pour la maille {maille_choisie}")
-
-    return gdf_socio_filtre, colonne_a_afficher, nom_indicateur_final, maille_choisie
+    # Par défaut on renvoie la maille IRIS
+    return dict_geodatas.get('IRIS'), colonne, label, 'IRIS'
 
 
 def interface_selection_poi():
+    """Sélecteur pour les POI."""
+    st.markdown("### 📍 Points d'Intérêt")
+    return st.multiselect(
+        "Afficher sur la carte :",
+        options=list(POI_CONFIG.keys()),
+        default=[],
+        placeholder="Ex: Écoles, Gares...",
+        key="sel_poi_main_interface"
+    )
+
+
+def interface_filtre_geo_risque(df_communes, key_suffix):
     """
-    Affiche un multiselect pour les POI dans un EXPANDER.
+    NOUVEAU (Page 02) : Génère les filtres Région/Département pour un risque spécifique (Inondation ou RGA).
+    Permet d'avoir deux blocs de filtres indépendants dans la même page.
     """
-    selection = []
-    # MODIFIÉ : Expander pour alléger la vue
-    with st.sidebar.expander("📍 Points d'Intérêt (POI)", expanded=False):
-        selection = st.multiselect(
-            "Générateurs de flux :",
-            options=list(POI_CONFIG.keys()),
-            default=[]
+    regions_filtrees = []
+    departements_filtres = []
+
+    mode = st.radio(
+        "Filtrer par :",
+        ["Région", "Département"],
+        horizontal=True,
+        key=f"mode_geo_{key_suffix}",
+        label_visibility="collapsed"
+    )
+
+    if mode == "Région":
+        regions = sorted(df_communes['Nom_Region'].unique())
+        regions_filtrees = st.multiselect(
+            "Sélectionner Région(s) :",
+            regions,
+            key=f"reg_{key_suffix}"
         )
-    return selection
+    else:
+        # Préparation et tri propre des départements
+        df_deps = df_communes[['Num_Dep', 'Nom_Dep']].copy().dropna().drop_duplicates('Num_Dep')
+        df_deps['sort_key'] = df_deps['Num_Dep'].apply(lambda x: str(x).zfill(2) if str(x).isdigit() else x)
+        df_deps = df_deps.sort_values('sort_key')
+        df_deps['label'] = df_deps['Num_Dep'].astype(str).str.zfill(2) + " - " + df_deps['Nom_Dep'].str.upper()
+
+        departements_filtres = st.multiselect(
+            "Sélectionner Département(s) :",
+            df_deps['label'].tolist(),
+            key=f"dep_{key_suffix}"
+        )
+
+    return regions_filtrees, departements_filtres
 
 
 def interface_selection_risques(df_communes):
     """
-    Affiche les contrôles pour les risques dans un EXPANDER.
+    LEGACY (Page 01) : Ancienne fonction utilisée par la page Analyse Concurrence.
+    JE LA GARDE INTACTE pour ne pas casser la Page 01.
     """
     risque_selectionne = None
     regions_filtrees = []
     departements_filtres = []
 
-    # MODIFIÉ : Expander
     with st.sidebar.expander("🌍 Risques & Climat", expanded=False):
-        afficher_risques = st.toggle("Activer la couche Risques", value=False)
+        afficher_risques = st.toggle("Activer la couche Risques", value=False, key="tog_risk_legacy")
 
         if afficher_risques:
             liste_risques = ["Inondations", "Sécheresse (RGA)"]
-            risque_selectionne = st.selectbox("Type de risque :", options=liste_risques)
+            risque_selectionne = st.selectbox("Type de risque :", options=liste_risques, key="sel_risk_legacy")
 
-            filtre_geo = st.radio("Zone géographique :", options=["Région", "Département"], horizontal=True)
+            filtre_geo = st.radio("Zone géographique :", options=["Région", "Département"], horizontal=True,
+                                  key="rad_geo_legacy")
 
             if filtre_geo == "Région":
                 regions_disponibles = sorted(df_communes['Nom_Region'].unique())
-                regions_filtrees = st.multiselect("Régions :", options=regions_disponibles)
+                regions_filtrees = st.multiselect("Régions :", options=regions_disponibles, key="mul_reg_legacy")
 
             elif filtre_geo == "Département":
                 df_deps = df_communes[['Num_Dep', 'Nom_Dep']].copy().dropna().drop_duplicates('Num_Dep')
-
-                # Tri optimisé pour la Corse (2A/2B)
-                def get_sort_key(val):
-                    v = str(val).upper()
-                    if v == '2A': return 20.1
-                    if v == '2B': return 20.2
-                    return int(v) if v.isdigit() else 999
-
-                df_deps['sort_key'] = df_deps['Num_Dep'].apply(get_sort_key)
+                df_deps['sort_key'] = df_deps['Num_Dep'].apply(lambda x: str(x).zfill(2) if str(x).isdigit() else x)
                 df_deps = df_deps.sort_values('sort_key')
-
                 df_deps['label'] = df_deps['Num_Dep'].astype(str).str.zfill(2) + " - " + df_deps['Nom_Dep'].str.upper()
-                departements_filtres = st.multiselect("Départements :", options=df_deps['label'].tolist())
-
-            if not regions_filtrees and not departements_filtres:
-                st.caption("⚠️ Sélectionnez une zone pour afficher le risque.")
+                departements_filtres = st.multiselect("Départements :", options=df_deps['label'].tolist(),
+                                                      key="mul_dep_legacy")
 
     return risque_selectionne, regions_filtrees, departements_filtres
+
+
+def interface_selection_batiments():
+    """
+    Sélecteur simple pour les critères bâtiments.
+    Utilisé dans Page 02 (Sidebar).
+    """
+    c1, c2 = st.columns(2)
+    with c1:
+        surface_min = st.number_input("Min (m²)", 0, 100000, 0, step=50, key="surf_min_bat")
+    with c2:
+        surface_max = st.number_input("Max (m²)", 0, 100000, 3000, step=100, key="surf_max_bat")
+
+    return True, surface_min, surface_max
 
 
 # ==============================================
@@ -150,7 +183,9 @@ def interface_selection_risques(df_communes):
 # ==============================================
 
 def interface_recherche_osm(df_geo, key_prefix):
-    """Interface recherche OSM (Avec gestion Corse)."""
+    """
+    Interface recherche OSM (Page 01 et 03).
+    """
     if df_geo is None or df_geo.empty:
         st.error("Données géographiques non chargées.")
         return pd.DataFrame()
@@ -174,16 +209,8 @@ def interface_recherche_osm(df_geo, key_prefix):
 
     elif maille_recherche in ['Département', 'Commune']:
         df_deps = df_geo[['Num_Dep', 'Nom_Dep']].drop_duplicates().dropna()
-
-        # Tri Corse
-        def get_sort(row):
-            v = str(row['Num_Dep']).upper()
-            if v == '2A': return 20.1
-            if v == '2B': return 20.2
-            return int(v) if v.isdigit() else 999
-
-        df_deps['sort'] = df_deps.apply(get_sort, axis=1)
-        df_deps = df_deps.sort_values('sort')
+        df_deps['sort_key'] = df_deps['Num_Dep'].apply(lambda x: str(x).zfill(2) if str(x).isdigit() else x)
+        df_deps = df_deps.sort_values('sort_key')
         options_deps = (df_deps['Num_Dep'].astype(str).str.zfill(2) + " - " + df_deps['Nom_Dep']).tolist()
 
         if maille_recherche == 'Département':
@@ -219,7 +246,9 @@ def interface_recherche_osm(df_geo, key_prefix):
 
 
 def interface_recherche_concurrence(engine):
-    """Interface recherche SIREN/NAF avec filtre Ville."""
+    """
+    Interface recherche SIREN/NAF (Page 01).
+    """
     if not engine: return pd.DataFrame()
 
     if 'etab_concurrence_details' not in st.session_state:
@@ -245,7 +274,6 @@ def interface_recherche_concurrence(engine):
         st.markdown("---")
         st.subheader("2. Zone de recherche")
 
-        # Boutons de choix
         choix = st.radio("Périmètre :", [f"Ville ({ville_ref})", f"Département ({d.get('nom_dep')})"], key="scope_conc")
         scope = "Ville" if "Ville" in choix else "Département"
 
@@ -256,15 +284,16 @@ def interface_recherche_concurrence(engine):
 
 
 # ==============================================
-# 3. FONCTIONS IMPLANTATION
+# 3. ZONE & FICHIERS
 # ==============================================
 
 def interface_point_interet(engine):
     """
-    Affiche une interface pour définir un POI via Adresse, Coords, ou SIREN/SIRET.
+    Interface définition zone (Adresse / Coords / SIRET).
+    Utilisé partout (Page 02, Page 03).
     """
     st.markdown("---")
-    st.subheader("Définir une zone d'implantation à analyser")
+    st.subheader("Définir une zone d'implantation")
 
     resultat = {
         "source": None,
@@ -283,209 +312,85 @@ def interface_point_interet(engine):
         ["Adresse", "Coordonnées", "SIREN (Siège) / SIRET (Étab.)"],
         horizontal=True,
         key="poi_source_choix",
-        on_change=lambda: (
-            st.session_state.update(siren_results=None, siret_info=None)
-        )
+        on_change=lambda: st.session_state.update(siren_results=None, siret_info=None)
     )
 
     # --- Adresse ---
     if source_choix == "Adresse":
-        poi_address_input = st.text_input(
-            "Adresse du point d'intérêt :",
-            placeholder="Ex: 8 Rue de Londres, 75009 Paris",
-            help="Entrez une adresse complète pour un géocodage précis.",
-            key="poi_adresse"
-        )
-        if poi_address_input:
+        val = st.text_input("Adresse :", placeholder="Ex: 8 Rue de Londres, 75009 Paris", key="poi_adresse")
+        if val:
             resultat["source"] = "Adresse"
-            resultat["valeur"] = poi_address_input
+            resultat["valeur"] = val
 
     # --- Coordonnées ---
     elif source_choix == "Coordonnées":
-        col1, col2 = st.columns(2)
-        with col1:
-            poi_lat_input = st.number_input("Latitude :", value=48.85, step=0.0001, format="%.4f", key="poi_lat")
-        with col2:
-            poi_lon_input = st.number_input("Longitude :", value=2.35, step=0.0001, format="%.4f", key="poi_lon")
-
+        c1, c2 = st.columns(2)
+        lat = c1.number_input("Latitude :", value=48.85, format="%.4f", key="poi_lat")
+        lon = c2.number_input("Longitude :", value=2.35, format="%.4f", key="poi_lon")
         resultat["source"] = "Coordonnées"
-        resultat["valeur"] = {"latitude": poi_lat_input, "longitude": poi_lon_input}
+        resultat["valeur"] = {"latitude": lat, "longitude": lon}
 
     # --- SIREN/SIRET ---
     elif source_choix == "SIREN (Siège) / SIRET (Étab.)":
-        identifier_input = st.text_input(
-            "Entrer le SIREN (9 chiffres) ou SIRET (14 chiffres) :",
-            placeholder="Ex: 383597342 (Siège Carrefour) ou 38359734200010 (Étab.)",
-            key="poi_siren_siret"
-        )
+        inp = st.text_input("SIREN/SIRET :", placeholder="383597342...", key="poi_siren_siret")
 
-        if st.button("Rechercher SIREN/SIRET", key="poi_siret_bouton"):
-            st.session_state.siren_results = None
-            st.session_state.siret_info = None
-
-            clean_id = str(identifier_input).strip().replace(" ", "")
-
-            if len(clean_id) == 14 and clean_id.isdigit():
-                etab_data = find_etablissement_by_siret(engine, clean_id)
-                if etab_data:
-                    st.success(f"Établissement trouvé : {etab_data.get('denominationunitelegale')}", icon="✅")
-                    st.session_state.siret_info = etab_data
-
-            elif len(clean_id) == 9 and clean_id.isdigit():
-                results = find_etablissements_by_siren(engine, clean_id)
-
-                if isinstance(results, pd.DataFrame):
-                    st.session_state.siren_results = results
-                elif isinstance(results, dict):
-                    st.success(f"Entreprise trouvée (établissement unique) : {results.get('denominationunitelegale')}",
-                               icon="✅")
-                    st.session_state.siret_info = results
-            else:
-                st.warning("Entrée invalide. Veuillez entrer un SIREN (9 chiffres) ou un SIRET (14 chiffres).",
-                           icon="⚠️")
+        if st.button("Rechercher", key="poi_siret_bouton"):
+            clean = inp.strip().replace(" ", "")
+            if len(clean) == 14:
+                res = find_etablissement_by_siret(engine, clean)
+                if res:
+                    st.success(f"Trouvé : {res.get('denominationunitelegale')}")
+                    st.session_state.siret_info = res
+            elif len(clean) == 9:
+                res = find_etablissements_by_siren(engine, clean)
+                if isinstance(res, dict):
+                    st.success(f"Trouvé : {res.get('denominationunitelegale')}")
+                    st.session_state.siret_info = res
+                elif isinstance(res, pd.DataFrame):
+                    st.session_state.siren_results = res
 
         if st.session_state.siren_results is not None:
-            df_results = st.session_state.siren_results
-            df_results['label'] = df_results.apply(
-                lambda
-                    row: f"{'[SIÈGE] ' if row['etablissementsiege'] else ''}{row.get('denominationunitelegale', 'N/A')} - {row.get('adresse', 'N/A')}",
-                axis=1
-            )
-            st.warning(f"Ce SIREN possède {len(df_results)} établissements. Veuillez en choisir un :")
-
-            df_results = df_results.sort_values(by='etablissementsiege', ascending=False)
-            selected_label = st.selectbox(
-                "Choisir un établissement :",
-                options=df_results['label'],
-                key="select_siret_from_siren",
-                index=0
-            )
-            if selected_label:
-                selected_row = df_results[df_results['label'] == selected_label].iloc[0]
-                st.session_state.siret_info = selected_row.to_dict()
+            df = st.session_state.siren_results
+            df['label'] = df.apply(lambda
+                                       r: f"{'[SIÈGE] ' if r['etablissementsiege'] else ''}{r['denominationunitelegale']} - {r['adresse']}",
+                                   axis=1)
+            sel = st.selectbox("Choisir établissement :", df['label'], key="select_siret_from_siren")
+            if sel:
+                st.session_state.siret_info = df[df['label'] == sel].iloc[0].to_dict()
 
         if st.session_state.siret_info:
             resultat["source"] = "SIRET/SIREN"
             resultat["valeur"] = st.session_state.siret_info
-            nom = st.session_state.siret_info.get('denominationunitelegale')
-            if nom and "non indique" in str(nom).lower():
-                st.warning("Le nom de cet établissement est 'Non indique' dans la base de données.", icon="ℹ️")
 
-    # --- Mode d'analyse ---
-    st.markdown("**Mode d'analyse de la zone :**")
-    analysis_mode = st.radio(
-        "Mode d'analyse :",
-        ('Point seul', "Cercle d'influence", 'Isochrones'),
-        horizontal=True,
-        key="poi_analysis_mode",
-        label_visibility="collapsed"
-    )
-
-    resultat["mode"] = analysis_mode
-    if analysis_mode == "Cercle d'influence":
-        resultat["radius"] = st.slider("Rayon (m) :", 100, 5000, 1000, 100, key="poi_radius_slider")
+    st.markdown("**Mode d'analyse :**")
+    mode = st.radio("", ["Point seul", "Isochrones", "Cercle d'influence"], horizontal=True,
+                    label_visibility="collapsed", key="mode_analyse_main")
+    resultat["mode"] = mode
+    if mode == "Cercle d'influence":
+        resultat["radius"] = st.slider("Rayon (m)", 100, 5000, 1000, key="poi_radius_slider")
 
     return resultat
 
 
-def interface_selection_batiments():
-    """
-    Affiche les contrôles pour l'affichage des bâtiments.
-    """
-    afficher_batiments = False
-    surface_min = 0
-    surface_max = 3000
-
-    with st.expander("🏙️ Afficher et filtrer les bâtiments dans la zone"):
-        st.info(
-            "ℹ️ **Note :** L'affichage des bâtiments nécessite le mode **'Cercle'** ou **'Isochrones'** (pas 'Point seul').")
-
-        afficher_batiments = st.toggle(
-            "Activer l'affichage des bâtiments",
-            help="Affiche l'emprise au sol des bâtiments (Nécessite une zone)."
-        )
-
-        if afficher_batiments:
-            st.markdown("Filtrer par surface au sol :")
-            col1, col2 = st.columns(2)
-
-            with col1:
-                surface_min = st.number_input(
-                    "Min (m²)",
-                    min_value=0,
-                    max_value=100000,
-                    value=0,
-                    step=10,
-                    key="surface_min"
-                )
-
-            with col2:
-                surface_max = st.number_input(
-                    "Max (m²)",
-                    min_value=0,
-                    max_value=100000,
-                    value=3000,
-                    step=50,
-                    key="surface_max"
-                )
-
-    return afficher_batiments, surface_min, surface_max
-
-
-# ==============================================
-# 4. FONCTIONS ENRICHISSEMENT
-# ==============================================
-
 def interface_enrichissement_fichier():
-    """
-    Affiche l'interface pour l'upload et le choix des paramètres.
-    """
+    """Interface upload enrichissement (Page 03)."""
     st.subheader("Enrichir un fichier local")
-
-    uploaded_file = st.file_uploader(
-        "Chargez votre fichier CSV",
-        type=["csv"]
-    )
-
-    colonne_id = None
-    type_identifiant = None
-    only_siege = False
-
+    uploaded_file = st.file_uploader("Chargez votre fichier CSV", type=["csv"])
     if uploaded_file:
         try:
             df_preview = pd.read_csv(uploaded_file, nrows=5, sep=None, engine='python')
             uploaded_file.seek(0)
+            c1, c2 = st.columns(2)
+            col_id = c1.selectbox("Colonne Identifiant :", df_preview.columns)
+            typ = c2.radio("Type :", ["SIRET (14)", "SIREN (9)"])
+            siege = st.checkbox("Sièges uniquement ?", value=True) if "SIREN" in typ else False
 
-            col1, col2 = st.columns(2)
-            with col1:
-                colonne_id = st.selectbox(
-                    "Quelle colonne contient les identifiants ?",
-                    options=df_preview.columns
-                )
-            with col2:
-                type_selection = st.radio(
-                    "Type d'identifiant :",
-                    options=["SIRET (14 chiffres)", "SIREN (9 chiffres)"]
-                )
-
-            if "SIREN" in type_selection:
-                only_siege = st.checkbox(
-                    "Ne récupérer que les Sièges Sociaux ?",
-                    value=True,
-                    help="Si décoché, récupère TOUS les établissements liés à ce SIREN."
-                )
-
-            if st.button("Lancer l'enrichissement", type="primary"):
-                with st.spinner("Lecture du fichier..."):
-                    df = pd.read_csv(uploaded_file, dtype={colonne_id: str}, sep=None, engine='python')
-
-                mode = "siret" if "SIRET" in type_selection else "siren"
-                return df, colonne_id, mode, only_siege
-
+            if st.button("Lancer"):
+                with st.spinner("Lecture..."):
+                    df = pd.read_csv(uploaded_file, dtype={col_id: str}, sep=None, engine='python')
+                return df, col_id, "siret" if "SIRET" in typ else "siren", siege
         except Exception as e:
-            st.error(f"Erreur lors de la lecture du fichier : {e}")
-            return None, None, None, False
-
+            st.error(f"Erreur : {e}")
     return None, None, None, False
 
 
@@ -496,7 +401,6 @@ def convertir_df_en_csv(df):
 
 def interface_telechargement_fichier(df, titre_section, nom_fichier_csv, message_info=None, couleur_info="success"):
     st.subheader(titre_section)
-
     if message_info:
         if couleur_info == "success":
             st.success(message_info)
@@ -505,15 +409,7 @@ def interface_telechargement_fichier(df, titre_section, nom_fichier_csv, message
         elif couleur_info == "error":
             st.error(message_info)
 
-    with st.expander(f"Aperçu des données ({len(df)} lignes)"):
+    with st.expander(f"Aperçu ({len(df)} lignes)"):
         st.dataframe(df.head(50))
 
-    csv_data = convertir_df_en_csv(df)
-
-    st.download_button(
-        label=f"📥 Télécharger {nom_fichier_csv}",
-        data=csv_data,
-        file_name=nom_fichier_csv,
-        mime="text/csv",
-        key=f"dl_{nom_fichier_csv}"
-    )
+    st.download_button(f"📥 Télécharger {nom_fichier_csv}", convertir_df_en_csv(df), nom_fichier_csv, "text/csv")

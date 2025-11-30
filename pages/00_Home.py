@@ -1,105 +1,115 @@
 # Fichier: pages/00_Home.py
+
 import streamlit as st
-from database import connect_to_db
 
-def afficher_accueil():
-    # =============================================================================
-    # STYLES CSS
-    # =============================================================================
+# =============================================================================
+# HEADER : POSITIONNEMENT HYBRIDE
+# =============================================================================
+
+st.title("🌍 GeoMarket & Risk")
+st.subheader("L'intelligence géographique au service de la performance et de la résilience")
+
+st.markdown("---")
+
+# Pitch : L'équilibre entre Business et Risque
+st.markdown("""
+**Bienvenue sur votre plateforme d'aide à la décision.**
+
+Dans un environnement incertain, la réussite d'une implantation ne dépend plus seulement de son potentiel commercial, mais aussi de sa durabilité.
+**GeoMarket & Risk** réconcilie ces deux enjeux :
+
+1.  **L'Offensive (Géomarketing)** : Détecter les meilleures opportunités de marché.
+2.  **La Défensive (Risques)** : Anticiper les impacts climatiques et sécuriser la valeur des actifs.
+""")
+
+# =============================================================================
+# LES PILIERS DE LA SOLUTION
+# =============================================================================
+
+st.markdown("### 🎯 Une vision à 360°")
+
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    st.image("https://img.icons8.com/fluency/96/bullish.png", width=70)
+    st.markdown("#### 1. Potentiel Marché")
+    st.write("""
+    Analysez la dynamique locale pour valider vos choix d'implantation.
+    * **Concurrence & Cannibalisation**
+    * **Sociodémographie (INSEE)**
+    * **Marché Immobilier (DVF)**
+    """)
+
+with c2:
+    st.image("https://img.icons8.com/fluency/96/shield.png", width=70)
+    st.markdown("#### 2. Maîtrise des Risques")
+    st.write("""
+    Identifiez les vulnérabilités physiques de chaque emplacement.
+    * **Inondation & Sécheresse**
+    * **Risques Incendie & Chaleur**
+    * **Audit à la parcelle**
+    """)
+
+with c3:
+    st.image("https://img.icons8.com/fluency/96/money-bag-euro.png", width=70)
+    st.markdown("#### 3. Impact Financier")
+    st.write("""
+    Traduisez les risques climatiques en indicateurs économiques.
+    * **Valorisation de Portefeuille (TIV)**
+    * **Coût des Dommages (Expected Loss)**
+    * **Risque de Transition (Carbone)**
+    """)
+
+st.markdown("---")
+
+# =============================================================================
+# MENU D'ACCÈS RAPIDE (4 MODULES)
+# =============================================================================
+
+st.subheader("🚀 Lancer une analyse")
+
+# On passe à 4 colonnes pour inclure l'Enrichissement
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    with st.container(border=True):
+        st.markdown("#### 📊 Concurrence")
+        st.caption("Analyse de marché")
+        st.write("Exploration du tissu économique local.")
+        st.page_link("pages/01_Analyse_Concurrence.py", label="Explorer", icon="👥")
+
+with col2:
+    with st.container(border=True):
+        st.markdown("#### 📍 Diagnostic")
+        st.caption("Site Unique")
+        st.write("Audit complet d'une adresse (Potentiel & Risque).")
+        st.page_link("pages/02_Zone_Implantation.py", label="Auditer", icon="🛡️")
+
+with col3:
+    with st.container(border=True):
+        st.markdown("#### 📉 Stress Test")
+        st.caption("Portefeuille")
+        st.write("Quantification financière des risques climatiques.")
+        st.page_link("pages/04_Stress_Test_Climat.py", label="Simuler", icon="🌪️")
+
+with col4:
+    with st.container(border=True):
+        st.markdown("#### 💾 Données")
+        st.caption("Utilitaire")
+        st.write("Enrichissement, SIRETisation et Géocodage.")
+        st.page_link("pages/03_Enrichissement_Data.py", label="Enrichir", icon="✨")
+
+st.markdown("---")
+
+# =============================================================================
+# FOOTER : MÉTHODOLOGIE
+# =============================================================================
+
+with st.expander("ℹ️ Sources de Données & Transparence"):
     st.markdown("""
-    <style>
-        .main-header {font-size: 2.5rem; color: #1f77b4; text-align: center; margin-bottom: 0.5rem;}
-        .sub-text {font-size: 1.2rem; text-align: center; color: #555; margin-bottom: 1.5rem;}
-        .status-text {text-align: center; font-weight: bold; font-size: 1rem; margin-bottom: 1rem;}
-        .card-icon {font-size: 3rem; margin-bottom: 10px; text-align: center;}
-        .card-title {font-size: 1.5rem; font-weight: bold; color: #333; margin-bottom: 10px; text-align: center;}
-    </style>
-    """, unsafe_allow_html=True)
+    **Une approche basée sur la donnée souveraine (Open Data) :**
 
-    # =============================================================================
-    # HEADER & STATUT BDD (Version Épurée)
-    # =============================================================================
-
-    st.markdown('<div class="main-header">🌍 CATMAP Data Marketing</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-text">Plateforme d\'Intelligence Géospatiale & Analyse de Réseau</div>', unsafe_allow_html=True)
-
-    # Check de santé du système (Affichage minimaliste)
-    try:
-        engine = connect_to_db()
-        if engine:
-            st.markdown(
-                '<div class="status-text" style="color: green;">🟢 Base de Données : Connectée</div>',
-                unsafe_allow_html=True
-            )
-    except:
-        st.markdown(
-            '<div class="status-text" style="color: red;">🔴 Base de Données : Déconnectée</div>',
-            unsafe_allow_html=True
-        )
-
-    st.markdown("---")
-
-    # =============================================================================
-    # PRÉSENTATION DES MODULES (3 Colonnes)
-    # =============================================================================
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        with st.container(border=True):
-            st.markdown('<div class="card-icon">📊</div>', unsafe_allow_html=True)
-            st.markdown('<div class="card-title">Analyse Concurrence</div>', unsafe_allow_html=True)
-            st.write("""
-            Étudiez votre environnement concurrentiel.
-
-            * **Recherche par Enseigne (OSM)**
-            * **Recherche par Code NAF (SIREN)**
-            * Visualisation des zones de couverture.
-            """)
-            st.info("👉 Utilisez le menu à gauche : **Analyse Concurrence**")
-
-    with col2:
-        with st.container(border=True):
-            st.markdown('<div class="card-icon">📍</div>', unsafe_allow_html=True)
-            st.markdown('<div class="card-title">Zone d\'Implantation</div>', unsafe_allow_html=True)
-            st.write("""
-            Analysez le potentiel d'une adresse précise.
-
-            * **Isochrones & Zones de chalandise**
-            * **Données Socio-Démographiques (INSEE)**
-            * **Risques (Inondation/Sécheresse)**
-            * **Emprise des Bâtiments**
-            """)
-            st.info("👉 Utilisez le menu à gauche : **Zone d'Implantation**")
-
-    with col3:
-        with st.container(border=True):
-            st.markdown('<div class="card-icon">💾</div>', unsafe_allow_html=True)
-            st.markdown('<div class="card-title">Enrichissement Data</div>', unsafe_allow_html=True)
-            st.write("""
-            Qualifiez vos fichiers clients ou prospects.
-
-            * Import de fichiers CSV (SIRET ou SIREN).
-            * **Récupération automatique** : Adresses, Lat/Lon, NAF.
-            * Détection des erreurs de format.
-            """)
-            st.info("👉 Utilisez le menu à gauche : **Enrichissement Data**")
-
-    # =============================================================================
-    # FOOTER / MÉTHODOLOGIE
-    # =============================================================================
-    st.markdown("---")
-    with st.expander("ℹ️ Méthodologie & Sources de Données"):
-        st.markdown("""
-        Cette application croise plusieurs sources de données officielles et Open Data :
-
-        1.  **Base SIRENE (INSEE)** : Stockée localement (PostgreSQL/PostGIS) pour une recherche exhaustive des entreprises françaises (~14 millions d'établissements).
-        2.  **OpenStreetMap (OSM)** : Utilisé pour la géolocalisation des enseignes, les fonds de carte et l'emprise des bâtiments.
-        3.  **Données Socio-Démographiques (INSEE)** : Données carroyées au niveau IRIS (Revenus, Population, CSP).
-        4.  **Données Risque Physique** : Zones inondables (TRI) et Risque Argile (RGA).
-        5.  **OpenRouteService** : Calcul des temps de trajet (Isochrones) en voiture.
-        """)
-
-# Si le fichier est exécuté directement (optionnel si appelé via main.py)
-if __name__ == "__main__":
-    afficher_accueil()
+    * **Marché :** Base SIRENE (INSEE), Valeurs Foncières (Etalab).
+    * **Territoire :** Données carroyées (INSEE), OpenStreetMap (Bâti/Forêt).
+    * **Climat :** Géorisques (MTE), Scénarios DRIAS (Météo-France).
+    """)

@@ -365,16 +365,14 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=15, tiles="OpenStreetMap")
 
     # =========================================================
-    # 1. ZONE D'ANALYSE (EN PREMIER = EN DESSOUS)
+    # 1. ZONE D'ANALYSE (Fond de carte)
     # =========================================================
-    # On l'ajoute en premier pour qu'elle soit en fond de carte
-    # et ne bloque pas le clic sur les points DVF ou les POI.
     if zone_analyse_geom and analysis_mode != 'Point seul':
         style_zone = {
             'fillColor': '#A67C00',  # Doré (Square)
             'color': '#A67C00',
             'weight': 2,
-            'fillOpacity': 0.2
+            'fillOpacity': 0.1
         }
         folium.GeoJson(
             zone_analyse_geom,
@@ -383,18 +381,17 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
         ).add_to(m)
 
     # =========================================================
-    # 2. DVF (Immobilier) (EN SECOND = PAR DESSUS LA ZONE)
+    # 2. DVF (Immobilier)
     # =========================================================
     legend_dvf = None
     if df_dvf is not None and not df_dvf.empty:
         if mode_affichage_dvf == "Heatmap":
             _ajouter_couche_dvf_heatmap(m, df_dvf, dvf_type_filtre)
         else:
-            # Les points seront cliquables car ajoutés APRES la zone
             legend_dvf = _ajouter_couche_dvf_points(m, df_dvf, dvf_type_filtre)
 
     # =========================================================
-    # 3. SOCIO & RISQUES
+    # 3. SOCIO & RISQUES (Couches contextuelles)
     # =========================================================
     cmap, single_val = _ajouter_couche_socio(m, gdf_socio, colonne_socio, nom_indicateur_socio)
     _ajouter_couche_risques_inondation(m, gdf_inondations)
@@ -412,15 +409,57 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
     ).add_to(m)
 
     # =========================================================
-    # 5. BÂTIMENTS
+    # 5. BÂTIMENTS (Coloration Dynamique selon Risque)
     # =========================================================
     if gdf_batiments is not None and not gdf_batiments.empty:
-        fg_bat = folium.FeatureGroup(name="Bâtiments", show=True).add_to(m)
-        style_bat = {'fillColor': '#3498db', 'color': '#2980b9', 'weight': 1, 'fillOpacity': 0.6}
+        fg_bat = folium.FeatureGroup(name="Bâtiments (Audit)", show=True).add_to(m)
+
+        # Fonction de style dynamique
+        def style_batiment(feature):
+            props = feature['properties']
+
+            # Par défaut : Bleu (Sain)
+            color = '#3498db'
+            fill_opacity = 0.5
+            weight = 1
+
+            # HIERARCHIE DES RISQUES (Rouge > Orange > Bleu)
+
+            # 1. Inondation (Priorité absolue) -> ROUGE
+            if props.get('has_Inondation'):
+                color = '#e74c3c'
+                fill_opacity = 0.8
+                weight = 2
+
+            # 2. Argile (RGA) -> ORANGE
+            elif props.get('has_Argile'):
+                color = '#e67e22'
+                fill_opacity = 0.7
+
+            return {
+                'fillColor': color,
+                'color': color,
+                'weight': weight,
+                'fillOpacity': fill_opacity
+            }
+
+        # Info-bulle dynamique (Tooltip)
+        tooltip_fields = ['surface_m2']
+        tooltip_aliases = ['Surface:']
+
+        # On ajoute les infos risques si elles existent dans les données
+        if 'niveau_Inondation' in gdf_batiments.columns:
+            tooltip_fields.append('niveau_Inondation')
+            tooltip_aliases.append('Inondation:')
+
+        if 'niveau_Argile' in gdf_batiments.columns:
+            tooltip_fields.append('niveau_Argile')
+            tooltip_aliases.append('Argile:')
+
         folium.GeoJson(
             gdf_batiments,
-            style_function=lambda x: style_bat,
-            tooltip=folium.features.GeoJsonTooltip(fields=['surface_m2'], aliases=['Surface (m²):'])
+            style_function=style_batiment,
+            tooltip=folium.features.GeoJsonTooltip(fields=tooltip_fields, aliases=tooltip_aliases)
         ).add_to(fg_bat)
 
     # =========================================================
@@ -428,6 +467,7 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
     # =========================================================
     if gdf_poi_trouves is not None and not gdf_poi_trouves.empty:
         fg_poi = folium.FeatureGroup(name="POI Zone", show=True).add_to(m)
+        # Import local pour éviter les cycles si besoin, ou utiliser l'argument passé
         from config import POI_CONFIG
 
         for _, r in gdf_poi_trouves.iterrows():
@@ -444,3 +484,63 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
     folium.LayerControl().add_to(m)
 
     return m, cmap, single_val, legend_dvf
+
+def analyser_environnement_naturel(bbox):
+    """
+    Scanne la zone pour détecter la végétation (Proxy Incendie & Chaleur).
+    Retourne :
+    - distance_foret (m) : Distance au bois le plus proche
+    - ratio_vegetation (%) : Part de la surface couverte par de la verdure
+    """
+    try:
+        # Tags OSM pour la nature
+        tags_nature = {
+            'landuse': ['forest', 'grass', 'meadow', 'orchard', 'vineyard'],
+            'natural': ['wood', 'scrub', 'heath', 'tree_row'],
+            'leisure': ['park', 'garden', 'golf_course']
+        }
+
+        # On récupère les géométries (Polygones)
+        # Note : On suppose que ox est importé comme osmnx
+        import osmnx as ox
+        gdf_nature = ox.features_from_bbox(bbox=bbox, tags=tags_nature)
+
+        if gdf_nature.empty:
+            return 9999, 0.0  # Pas de nature détectée
+
+        # 1. Calcul Risque Incendie (Proximité Forêt/Bois)
+        # On filtre uniquement ce qui brûle fort (Bois/Forêt)
+        mask_foret = (gdf_nature['landuse'].isin(['forest'])) | (gdf_nature['natural'].isin(['wood', 'scrub']))
+        gdf_foret = gdf_nature[mask_foret]
+
+        dist_foret = 9999
+        if not gdf_foret.empty:
+            # On prend le centre de la bbox comme point de référence (le site)
+            centre_lat = (bbox[1] + bbox[3]) / 2
+            centre_lon = (bbox[0] + bbox[2]) / 2
+            point_ref = gpd.GeoSeries([Point(centre_lon, centre_lat)], crs="EPSG:4326").to_crs("EPSG:3857")
+
+            # Distance minimale à un polygone de forêt
+            geom_foret = gdf_foret.to_crs("EPSG:3857").unary_union
+            dist_foret = point_ref.distance(geom_foret).iloc[0]
+
+        # 2. Calcul Confort Thermique (Ratio Végétal)
+        # Surface totale de la bbox (approx)
+        xmin, ymin, xmax, ymax = bbox
+        # Calcul surface simple (degrés -> mètres approx)
+        # Pour faire simple : on fait le ratio des surfaces projetées
+        gdf_nature_proj = gdf_nature.to_crs("EPSG:3857")
+        surface_veg = gdf_nature_proj.area.sum()
+
+        # Surface de la zone d'étude (Bbox)
+        from shapely.geometry import box
+        poly_bbox = gpd.GeoSeries([box(xmin, ymin, xmax, ymax)], crs="EPSG:4326").to_crs("EPSG:3857")
+        surface_totale = poly_bbox.area.iloc[0]
+
+        ratio = (surface_veg / surface_totale) * 100
+
+        return dist_foret, ratio
+
+    except Exception as e:
+        print(f"Erreur analyse nature : {e}")
+        return 9999, 0.0

@@ -1,4 +1,3 @@
-# Fichier: main.py
 import streamlit as st
 
 # 1. Configuration Globale (doit être la 1ère commande Streamlit)
@@ -8,14 +7,14 @@ st.set_page_config(
     layout="wide"
 )
 
-# 2. Définition des Pages (C'est ici qu'on renomme !)
-# On mappe le fichier physique -> vers -> le Nom affiché dans le menu
+# 2. Définition des Pages
+# On déclare chaque fichier ici
 
 page_accueil = st.Page(
-    "pages/00_Home.py",       # Fichier réel
-    title="Accueil",          # Nom affiché dans le menu 👈
-    icon="🏠",                # Icône du menu
-    default=True              # C'est la page par défaut
+    "pages/00_Home.py",
+    title="Accueil",
+    icon="🏠",
+    default=True
 )
 
 page_concurrence = st.Page(
@@ -36,10 +35,23 @@ page_enrichissement = st.Page(
     icon="💾"
 )
 
+
+page_stress_test = st.Page(
+    "pages/04_Stress_Test_Climat.py",  # Le chemin exact de votre fichier
+    title="Stress Test Climat",        # Le titre dans le menu
+    icon="📉"                          # Icône pertinente
+)
+
 # 3. Création de la Navigation
+# On ajoute la variable 'page_stress_test' dans la liste
 pg = st.navigation({
     "Menu Principal": [page_accueil],
-    "Outils d'Analyse": [page_concurrence, page_implantation, page_enrichissement]
+    "Outils d'Analyse": [
+        page_concurrence,
+        page_implantation,
+        page_enrichissement,
+        page_stress_test  # <--- C'EST ICI QU'ON L'ACTIVE
+    ]
 })
 
 # 4. Lancement
