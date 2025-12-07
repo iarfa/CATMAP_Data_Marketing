@@ -78,7 +78,6 @@ def interface_selection_socio(dict_geodatas):
     # Par défaut on renvoie la maille IRIS
     return dict_geodatas.get('IRIS'), colonne, label, 'IRIS'
 
-
 def interface_selection_poi():
     """Sélecteur pour les POI."""
     st.markdown("### 📍 Points d'Intérêt")
@@ -89,7 +88,6 @@ def interface_selection_poi():
         placeholder="Ex: Écoles, Gares...",
         key="sel_poi_main_interface"
     )
-
 
 def interface_filtre_geo_risque(df_communes, key_suffix):
     """
@@ -129,40 +127,43 @@ def interface_filtre_geo_risque(df_communes, key_suffix):
 
     return regions_filtrees, departements_filtres
 
-
 def interface_selection_risques(df_communes):
     """
-    LEGACY (Page 01) : Ancienne fonction utilisée par la page Analyse Concurrence.
-    JE LA GARDE INTACTE pour ne pas casser la Page 01.
+    Interface harmonisée pour la Sidebar (Page 01).
+    Plus d'expander caché, on affiche tout clairement comme les autres sections.
     """
+    st.markdown("### 🌪️ Risques & Climat")
+
+    # On force l'affichage par défaut pour que l'utilisateur voit les options
+    # Ou on met un toggle si on veut gagner de la place
+    afficher_risques = st.toggle("Activer la couche Risques", value=False, key="tog_risk_harmonized")
+
     risque_selectionne = None
     regions_filtrees = []
     departements_filtres = []
 
-    with st.sidebar.expander("🌍 Risques & Climat", expanded=False):
-        afficher_risques = st.toggle("Activer la couche Risques", value=False, key="tog_risk_legacy")
+    if afficher_risques:
+        liste_risques = ["Inondations", "Sécheresse (RGA)"]
+        risque_selectionne = st.selectbox("Type de risque :", options=liste_risques, key="sel_risk_harmonized")
 
-        if afficher_risques:
-            liste_risques = ["Inondations", "Sécheresse (RGA)"]
-            risque_selectionne = st.selectbox("Type de risque :", options=liste_risques, key="sel_risk_legacy")
+        st.caption("Filtrage Géographique (Optionnel)")
+        filtre_geo = st.radio("Zone :", options=["Région", "Département"], horizontal=True,
+                              label_visibility="collapsed", key="rad_geo_harmonized")
 
-            filtre_geo = st.radio("Zone géographique :", options=["Région", "Département"], horizontal=True,
-                                  key="rad_geo_legacy")
+        if filtre_geo == "Région":
+            regions_disponibles = sorted(df_communes['Nom_Region'].unique())
+            regions_filtrees = st.multiselect("Choisir Région(s) :", options=regions_disponibles,
+                                              key="mul_reg_harmonized")
 
-            if filtre_geo == "Région":
-                regions_disponibles = sorted(df_communes['Nom_Region'].unique())
-                regions_filtrees = st.multiselect("Régions :", options=regions_disponibles, key="mul_reg_legacy")
-
-            elif filtre_geo == "Département":
-                df_deps = df_communes[['Num_Dep', 'Nom_Dep']].copy().dropna().drop_duplicates('Num_Dep')
-                df_deps['sort_key'] = df_deps['Num_Dep'].apply(lambda x: str(x).zfill(2) if str(x).isdigit() else x)
-                df_deps = df_deps.sort_values('sort_key')
-                df_deps['label'] = df_deps['Num_Dep'].astype(str).str.zfill(2) + " - " + df_deps['Nom_Dep'].str.upper()
-                departements_filtres = st.multiselect("Départements :", options=df_deps['label'].tolist(),
-                                                      key="mul_dep_legacy")
+        elif filtre_geo == "Département":
+            df_deps = df_communes[['Num_Dep', 'Nom_Dep']].copy().dropna().drop_duplicates('Num_Dep')
+            df_deps['sort_key'] = df_deps['Num_Dep'].apply(lambda x: str(x).zfill(2) if str(x).isdigit() else x)
+            df_deps = df_deps.sort_values('sort_key')
+            df_deps['label'] = df_deps['Num_Dep'].astype(str).str.zfill(2) + " - " + df_deps['Nom_Dep'].str.upper()
+            departements_filtres = st.multiselect("Choisir Département(s) :", options=df_deps['label'].tolist(),
+                                                  key="mul_dep_harmonized")
 
     return risque_selectionne, regions_filtrees, departements_filtres
-
 
 def interface_selection_batiments():
     """
@@ -176,16 +177,17 @@ def interface_selection_batiments():
         surface_max = st.number_input("Max (m²)", 0, 100000, 3000, step=100, key="surf_max_bat")
 
     return True, surface_min, surface_max
-
-
 # ==============================================
 # 2. FONCTIONS RECHERCHE (MAIN AREA)
 # ==============================================
 
 def interface_recherche_osm(df_geo, key_prefix):
     """
-    Interface recherche OSM (Page 01 et 03).
+    Interface recherche OSM avec Session State pour corriger le bug du Radar.
     """
+    # Clé unique pour stocker les résultats de cette recherche spécifique
+    session_key = f"{key_prefix}_resultats"
+
     if df_geo is None or df_geo.empty:
         st.error("Données géographiques non chargées.")
         return pd.DataFrame()
@@ -224,6 +226,7 @@ def interface_recherche_osm(df_geo, key_prefix):
                 communes = sorted(df_geo[df_geo['Nom_Dep'].isin(noms_deps)]['Nom_Ville'].unique())
                 selection_geo = st.multiselect("Communes :", communes, key=f"{key_prefix}_communes")
 
+    # BOUTON DE RECHERCHE
     if st.button("Lancer la recherche", type="primary", key=f"{key_prefix}_btn"):
         villes = []
         if selection_geo:
@@ -236,52 +239,90 @@ def interface_recherche_osm(df_geo, key_prefix):
 
         if noms_etablissements and villes:
             with st.spinner("Recherche OSM..."):
-                df_res = recherche_etablissements_osm(noms_etablissements, list(set(villes)))
-            return df_res if df_res is not None else pd.DataFrame()
+                # On stocke le résultat dans la session
+                st.session_state[session_key] = recherche_etablissements_osm(noms_etablissements, list(set(villes)))
         else:
             st.warning("Remplissez les champs.")
-            return pd.DataFrame()
+            st.session_state[session_key] = pd.DataFrame()
 
-    return pd.DataFrame()
+    # On retourne ce qui est stocké en mémoire (persiste après rechargement)
+    return st.session_state.get(session_key, pd.DataFrame())
 
-
-def interface_recherche_concurrence(engine):
+def interface_recherche_concurrence(engine, df_communes):
     """
-    Interface recherche SIREN/NAF (Page 01).
+    Interface SIREN (Déjà corrigée précédemment, je remets juste pour être sûr qu'on utilise bien Session State).
     """
     if not engine: return pd.DataFrame()
 
     if 'etab_concurrence_details' not in st.session_state:
         st.session_state.etab_concurrence_details = None
 
+    # Clé de stockage des résultats
+    if 'gdf_concurrents' not in st.session_state:
+        st.session_state.gdf_concurrents = pd.DataFrame()
+
     siret_input = st.text_input("SIRET de référence (14 chiffres) :", key="concurrence_siret_input")
 
     if st.button("1. Rechercher l'établissement", key="concurrence_search"):
-        st.session_state.etab_concurrence_details = get_etab_details_for_concurrence(engine, siret_input)
-        st.session_state.gdf_concurrents = pd.DataFrame()
+        with st.spinner("Interrogation base SIRENE..."):
+            st.session_state.etab_concurrence_details = get_etab_details_for_concurrence(engine, siret_input)
+            # On vide les résultats précédents si on change d'établissement cible
+            st.session_state.gdf_concurrents = pd.DataFrame()
 
     if st.session_state.etab_concurrence_details:
         d = st.session_state.etab_concurrence_details
         naf = d.get('activiteprincipaleetablissement')
         desc = d.get('description_naf', 'Non dispo')
         addr = d.get('adresse', '')
+        num_dep_etab = d.get('numero_dep')
+        # nom_dep_etab = d.get('nom_dep') # Variable inutilisée pour le moment
         ville_ref = extraire_ville_depuis_adresse(addr)
 
         st.success(f"Trouvé : **{d.get('denominationunitelegale')}**")
         st.info(f"NAF : **{naf}** ({desc})")
-        st.caption(f"📍 {addr}")
 
         st.markdown("---")
         st.subheader("2. Zone de recherche")
 
-        choix = st.radio("Périmètre :", [f"Ville ({ville_ref})", f"Département ({d.get('nom_dep')})"], key="scope_conc")
-        scope = "Ville" if "Ville" in choix else "Département"
+        # Logique de pré-remplissage Scope
+        region_etab = "Inconnue"
+        if not df_communes.empty and num_dep_etab:
+            match_reg = df_communes[df_communes['Num_Dep'] == str(num_dep_etab)]
+            if not match_reg.empty:
+                region_etab = match_reg.iloc[0]['Nom_Region']
 
-        if st.button("2. Lancer l'analyse", type="primary"):
-            return find_concurrents(engine, siret_input, naf, scope, d.get('numero_dep'), ville_ref)
+        choix_scope = st.radio(
+            "Périmètre d'analyse :",
+            [f"Ville ({ville_ref})", f"Département ({num_dep_etab})", f"Région ({region_etab})", "France Entière"],
+            key="scope_conc_radio"
+        )
 
-    return st.session_state.get('gdf_concurrents', pd.DataFrame())
+        scope_type = "Département"
+        scope_value = num_dep_etab
 
+        if "Ville" in choix_scope:
+            scope_type = "Ville"
+        elif "Département" in choix_scope:
+            scope_type = "Département"
+        elif "Région" in choix_scope:
+            scope_type = "Région"
+            if not df_communes.empty:
+                deps_region = df_communes[df_communes['Nom_Region'] == region_etab]['Num_Dep'].unique().tolist()
+                scope_value = deps_region
+            else:
+                scope_value = [num_dep_etab]
+        elif "France" in choix_scope:
+            scope_type = "France"
+            scope_value = None
+
+        if st.button(f"2. Lancer l'analyse ({scope_type})", type="primary"):
+            with st.spinner(f"Recherche des concurrents sur : {scope_type}..."):
+                # On stocke dans la session
+                st.session_state.gdf_concurrents = find_concurrents(engine, siret_input, naf, scope_type, scope_value,
+                                                                    ville_ref)
+
+    # On retourne la donnée persistée
+    return st.session_state.gdf_concurrents
 
 # ==============================================
 # 3. ZONE & FICHIERS
@@ -362,15 +403,18 @@ def interface_point_interet(engine):
             resultat["source"] = "SIRET/SIREN"
             resultat["valeur"] = st.session_state.siret_info
 
+    # --- MODE D'ANALYSE ---
     st.markdown("**Mode d'analyse :**")
     mode = st.radio("", ["Point seul", "Isochrones", "Cercle d'influence"], horizontal=True,
                     label_visibility="collapsed", key="mode_analyse_main")
     resultat["mode"] = mode
+
     if mode == "Cercle d'influence":
-        resultat["radius"] = st.slider("Rayon (m)", 100, 5000, 1000, key="poi_radius_slider")
+        # CORRECTION ICI : Slider en KM pour l'UX, conversion en Mètres pour le backend
+        radius_km = st.slider("Rayon (km)", 0.1, 5.0, 1.0, 0.1, key="poi_radius_slider")
+        resultat["radius"] = int(radius_km * 1000)
 
     return resultat
-
 
 def interface_enrichissement_fichier():
     """Interface upload enrichissement (Page 03)."""
@@ -393,11 +437,9 @@ def interface_enrichissement_fichier():
             st.error(f"Erreur : {e}")
     return None, None, None, False
 
-
 @st.cache_data
 def convertir_df_en_csv(df):
     return df.to_csv(index=False, sep=';').encode('utf-8-sig')
-
 
 def interface_telechargement_fichier(df, titre_section, nom_fichier_csv, message_info=None, couleur_info="success"):
     st.subheader(titre_section)
