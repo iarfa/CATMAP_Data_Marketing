@@ -130,102 +130,156 @@ def find_etablissements_by_siren(_engine, siren):
 # Logique d'enrichissement de fichier (Goal 2 / P6)
 # ==================================================================
 
+
+
+# ==================================================================
+# LOGIQUE CORRECTION DOM-TOM (Via Adresse)
+# ==================================================================
+
+REF_DOM_TOM = {
+    '971': 'Guadeloupe', '972': 'Martinique', '973': 'Guyane', '974': 'La Réunion',
+    '975': 'Saint-Pierre-et-Miquelon', '976': 'Mayotte', '977': 'Saint-Barthélemy', '978': 'Saint-Martin',
+    '986': 'Wallis-et-Futuna', '987': 'Polynésie française', '988': 'Nouvelle-Calédonie'
+}
+
+
+def _corriger_departement_via_adresse(row):
+    """
+    Déduit le département DOM-TOM en cherchant le Code Postal dans l'adresse (Regex).
+    """
+    code_dep = str(row.get('numero_dep', '')).strip()
+    nom_dep_bdd = str(row.get('nom_dep', ''))
+    adresse = str(row.get('adresse', ''))
+
+    # 1. Si on a déjà un nom valide (Métropole), on ne touche à rien
+    if nom_dep_bdd not in ['None', 'nan', '', 'NaN'] and code_dep != '97':
+        return nom_dep_bdd
+
+    # 2. Si c'est un code 97/98 ou que le nom est manquant, on scanne l'adresse
+    if code_dep in ['97', '98'] or code_dep.startswith('97') or code_dep.startswith('98'):
+        # Regex : Cherche un nombre de 5 chiffres commençant par 97 ou 98 isolé
+        match = re.search(r'\b(9[78]\d{3})\b', adresse)
+        if match:
+            cp = match.group(1)
+            prefixe = cp[:3]  # Ex: 974
+            return REF_DOM_TOM.get(prefixe, "Outre-Mer (Indéterminé)")
+
+        return "Outre-Mer (Indéterminé)"
+
+    return nom_dep_bdd
+
+# ==================================================================
+# 2. FONCTION ENRICHISSEMENT (Version Finale)
+# ==================================================================
+
 @st.cache_data(show_spinner="Enrichissement du fichier en cours (requête BDD)...")
 def enrichir_dataframe_siren(_engine, df, colonne_id, type_identifiant, only_siege=True):
     """
-    Enrichit un DataFrame.
-    CORRIGÉ : Suppression des colonnes 'codepostaletablissement' et 'libellecommuneetablissement'
-    qui n'existent plus dans la nouvelle structure de base.
+    Enrichit un DataFrame avec gestion intelligente des DOM (via adresse) et des doublons.
     """
     if not _engine:
         st.error("Connexion à la base de données échouée.")
         return df, pd.DataFrame(), pd.DataFrame()
 
-    # 1. Nettoyage préliminaire
+    # --- 1. Nettoyage Préliminaire ---
+    df_work = df.copy()
+    temp_key = "cle_recherche_temp"
+
     try:
-        df['clean_id'] = df[colonne_id].astype(str).str.replace(' ', '', regex=False).str.replace('.', '',
-                                                                                                  regex=False).str.strip()
-        df['clean_id'] = df['clean_id'].apply(lambda x: x[:-2] if x.endswith('.0') else x)
+        df_work[temp_key] = df_work[colonne_id].astype(str).str.replace(' ', '', regex=False).str.replace('.', '',
+                                                                                                          regex=False).str.strip()
+        df_work[temp_key] = df_work[temp_key].apply(lambda x: x[:-2] if x.endswith('.0') else x)
     except KeyError:
-        st.error(f"Colonne '{colonne_id}' non trouvée dans le fichier.")
+        st.error(f"Colonne '{colonne_id}' non trouvée.")
         return df, pd.DataFrame(), pd.DataFrame()
 
-    # 2. Validation du format
-    mask_valid = pd.Series([False] * len(df), index=df.index)
+    # --- 2. Construction de la requête (SANS codepostaletablissement) ---
+    mask_valid = pd.Series([False] * len(df_work), index=df_work.index)
+
+    # Note : On ne demande plus le code postal à la BDD pour éviter le crash
+    base_select = """
+        SELECT 
+            siret AS join_key,
+            siren, denominationunitelegale, adresse, 
+            latitude, longitude,
+            activiteprincipaleetablissement, intitules_naf_vf, 
+            numero_dep, nom_dep, etablissementsiege
+        FROM etablissements
+    """
 
     if type_identifiant == "siret":
-        mask_valid = (df['clean_id'].str.len() == 14) & (df['clean_id'].str.isdigit())
-
-        # MODIFIÉ : Suppression des colonnes inexistantes
-        query_str = """
-            SELECT 
-                siret AS join_key,
-                siren, denominationunitelegale, adresse, latitude, longitude,
-                activiteprincipaleetablissement, intitules_naf_vf, numero_dep, nom_dep,
-                etablissementsiege
-            FROM etablissements WHERE siret IN :liste_ids
-        """
+        mask_valid = (df_work[temp_key].str.len() == 14) & (df_work[temp_key].str.isdigit())
+        query_str = f"{base_select} WHERE siret IN :liste_ids"
 
     elif type_identifiant == "siren":
-        mask_valid = (df['clean_id'].str.len() == 9) & (df['clean_id'].str.isdigit())
-
+        mask_valid = (df_work[temp_key].str.len() == 9) & (df_work[temp_key].str.isdigit())
         clause_siege = "AND etablissementsiege = True" if only_siege else ""
-
-        # MODIFIÉ : Suppression des colonnes inexistantes
         query_str = f"""
             SELECT 
                 siren AS join_key,
-                siret, denominationunitelegale, adresse, latitude, longitude,
-                activiteprincipaleetablissement, intitules_naf_vf, numero_dep, nom_dep,
-                etablissementsiege
+                siret, denominationunitelegale, adresse, 
+                latitude, longitude,
+                activiteprincipaleetablissement, intitules_naf_vf, 
+                numero_dep, nom_dep, etablissementsiege
             FROM etablissements 
             WHERE siren IN :liste_ids {clause_siege}
         """
 
-    # --- DataFrame 3 : REJETS DE FORMAT ---
-    df_rejet_format = df[~mask_valid].copy()
-    if 'clean_id' in df_rejet_format.columns:
-        df_rejet_format = df_rejet_format.drop(columns=['clean_id'])
-
-    ids_valides_uniques = df.loc[mask_valid, 'clean_id'].unique().tolist()
+    # Gestion Rejets
+    df_rejet_format = df_work[~mask_valid].drop(columns=[temp_key], errors='ignore').copy()
+    ids_valides_uniques = df_work.loc[mask_valid, temp_key].unique().tolist()
 
     if not ids_valides_uniques:
         return pd.DataFrame(), pd.DataFrame(), df_rejet_format
 
-    # 3. Exécution
+    # --- 3. Exécution SQL ---
     try:
         query = sqlalchemy.text(query_str)
-        params = {"liste_ids": tuple(ids_valides_uniques)}
-        with _engine.connect() as conn:
-            resultats_df = pd.read_sql_query(query, conn, params=params)
+        chunk_size = 50000
+        resultats_liste = []
+
+        for i in range(0, len(ids_valides_uniques), chunk_size):
+            chunk_ids = ids_valides_uniques[i:i + chunk_size]
+            with _engine.connect() as conn:
+                res_chunk = pd.read_sql_query(query, conn, params={"liste_ids": tuple(chunk_ids)})
+                resultats_liste.append(res_chunk)
+
+        resultats_df = pd.concat(resultats_liste, ignore_index=True) if resultats_liste else pd.DataFrame()
+
     except Exception as e:
         st.error(f"Erreur SQL : {e}")
         return pd.DataFrame(), pd.DataFrame(), df_rejet_format
 
-    # 4. Fusion
-    df_valide_input = df[mask_valid].copy()
+    # --- 4. Correction des DOM-TOM via l'adresse ---
+    if not resultats_df.empty:
+        # On utilise la fonction helper définie au-dessus
+        resultats_df['nom_dep'] = resultats_df.apply(_corriger_departement_via_adresse, axis=1)
+
+    # --- 5. Fusion et Nettoyage ---
+    df_valide_input = df_work[mask_valid].copy()
 
     df_merged = pd.merge(
         df_valide_input,
         resultats_df,
-        left_on='clean_id',
+        left_on=temp_key,
         right_on='join_key',
-        how='left'
+        how='left',
+        suffixes=('', '_officiel')
     )
 
-    cols_to_drop = ['join_key', 'clean_id']
-    df_merged = df_merged.drop(columns=[c for c in cols_to_drop if c in df_merged.columns])
-
-    # 5. Séparation
     mask_found = df_merged['denominationunitelegale'].notna()
 
     df_succes = df_merged[mask_found].copy()
+    df_not_found = df_merged[~mask_found].copy()
 
-    df_echec_not_found = df_merged[~mask_found].copy()
-    cols_resultats = [c for c in resultats_df.columns if c != 'join_key']
-    df_echec_not_found = df_echec_not_found.drop(columns=cols_resultats, errors='ignore')
+    cols_techniques = ['join_key', temp_key]
+    df_succes = df_succes.drop(columns=cols_techniques, errors='ignore')
 
-    return df_succes, df_echec_not_found, df_rejet_format
+    cols_bdd = [c for c in resultats_df.columns if c != 'join_key']
+    cols_bdd_renommees = [c + '_officiel' if c in df_valide_input.columns else c for c in cols_bdd]
+    df_not_found = df_not_found.drop(columns=cols_techniques + cols_bdd + cols_bdd_renommees, errors='ignore')
+
+    return df_succes, df_not_found, df_rejet_format
 
 # ==================================================================
 # NOUVEAU : Logique de concurrence (Pour Goal 3 / P4)
@@ -705,30 +759,35 @@ def calculer_stats_anciennete(_engine, code_naf, scope, scope_value, ville_origi
         print(f"Erreur calcul ancienneté : {e}")
         return None
 
-@st.cache_data(show_spinner="Chargement des valeurs foncières (DVF)...")
+@st.cache_data(show_spinner="Chargement historique DVF (2020-2025)...")
 def charger_donnees_dvf(path_parquet):
     """
-    Charge le fichier Parquet DVF.
-    Convertit la date pour le filtrage.
+    Charge le fichier Parquet DVF consolidé.
+    Optimisé pour ne lire que les colonnes nécessaires (RAM).
     """
     try:
-        df = pd.read_parquet(path_parquet)
+        # 1. OPTIMISATION RAM : On liste strictement ce dont on a besoin
+        # Cela permet à read_parquet de ne pas charger les colonnes inutiles (comme id_mutation)
+        cols_a_charger = [
+            'latitude', 'longitude',
+            'prix_m2', 'type_local',
+            'date_mutation', 'valeur_fonciere', 'surface_reelle_bati'
+        ]
 
-        # Vérification colonnes
-        required = ['latitude', 'longitude', 'prix_m2', 'type_local', 'date_mutation', 'valeur_fonciere',
-                    'surface_reelle_bati']
-        if not all(c in df.columns for c in required):
-            st.error("Colonnes DVF manquantes.")
-            return pd.DataFrame()
+        # Lecture optimisée
+        df = pd.read_parquet(path_parquet, columns=cols_a_charger)
 
-        # Conversion Date pour le filtre temporel
+        # 2. SÉCURITÉ DATE : Conversion si nécessaire
         if not pd.api.types.is_datetime64_any_dtype(df['date_mutation']):
             df['date_mutation'] = pd.to_datetime(df['date_mutation'], errors='coerce')
 
-        # Extraction Année pour faciliter les filtres
-        df['annee'] = df['date_mutation'].dt.year
+        # 3. CRÉATION COLONNE ANNÉE (Indispensable pour ta logique 2 ans vs 6 ans)
+        # On vérifie si elle existe déjà, sinon on la crée à la volée
+        if 'annee' not in df.columns:
+            df['annee'] = df['date_mutation'].dt.year
 
         return df
+
     except FileNotFoundError:
         st.warning(f"Fichier DVF introuvable : {path_parquet}")
         return pd.DataFrame()
@@ -736,24 +795,15 @@ def charger_donnees_dvf(path_parquet):
         st.error(f"Erreur chargement DVF : {e}")
         return pd.DataFrame()
 
-def calculer_comparatif_radar(gdf_iris, zone_geom, metriques_demandees=None, df_communes_ref=None):
+def calculer_comparatif_radar(gdf_iris, zone_geom, metriques_demandees=None, df_communes_ref=None,
+                              niveau_comparaison="Département"):
     """
-    Calcule les indicateurs radar avec choix des métriques et nom du département.
-
-    Args:
-        metriques_demandees (list): Liste de clés de configuration (ex: ['Revenus', 'Cadres']).
-                                    Si None, utilise tout.
-        df_communes_ref (DataFrame): Pour traduire le code dept (33) en nom (Gironde).
-
-    Returns:
-        tuple: (DataFrame des stats, String nom_departement)
+    Calcule les indicateurs radar avec choix du benchmark (Département, Région, France).
     """
-    # 1. Sécurités de base
     if gdf_iris is None or gdf_iris.empty or zone_geom is None:
         return None, "Données Manquantes"
 
-    # --- CONFIGURATION CENTRALE DES MÉTRIQUES ---
-    # Format : "Clé": ("Label Affiché", Colonne_Num, Colonne_Denom, Is_Revenu)
+    # --- CONFIGURATION ---
     CONFIG_METRIQUES_DB = {
         "Revenus": ("Revenus (Médian)", "Revenu_median", None, True),
         "Jeunes": ("Jeunes (<25 ans)", "Pop_15_24_ans", "Population_totale", False),
@@ -763,122 +813,131 @@ def calculer_comparatif_radar(gdf_iris, zone_geom, metriques_demandees=None, df_
         "Ouvriers": ("Ouvriers (CSP-)", "Menages_ouvriers_CS6", "Nb_menages_total", False),
         "Familles": ("Ménages avec Enfants", "Menages_couple_avec_enfant", "Nb_menages_total", False),
         "Monoparental": ("Familles Monoparentales", "Menages_monoparental", "Nb_menages_total", False),
-        "Retraités": ("Retraités", "Menages_retraites_CS7", "Nb_menages_total", False)
+        "Retraités": ("Retraités", "Menages_retraites_CS7", "Nb_menages_total", False),
+        "Retraites": ("Retraités", "Menages_retraites_CS7", "Nb_menages_total", False)
     }
 
-    # Si aucune sélection (premier chargement), on prend un set par défaut
     if not metriques_demandees:
         metriques_demandees = ["Revenus", "Jeunes", "Actifs", "Seniors", "Cadres"]
 
-    # --- 2. INTERSECTION SPATIALE (Moteur Géographique) ---
+    # --- 2. INTERSECTION SPATIALE (Zone Étudiée) ---
     try:
-        # Création GeoDataFrame pour la zone
         gdf_zone_analyse = gpd.GeoDataFrame({'geometry': [zone_geom]}, crs="EPSG:4326")
-
-        # Alignement CRS (Projection GPS)
         gdf_iris_work = gdf_iris.copy()
         if gdf_iris_work.crs is None:
             gdf_iris_work.set_crs("EPSG:4326", inplace=True)
         elif gdf_iris_work.crs.to_string() != "EPSG:4326":
             gdf_iris_work = gdf_iris_work.to_crs("EPSG:4326")
 
-        # Jointure Spatiale (On garde les IRIS qui touchent la zone)
+        # Calcul de la zone locale
         iris_zone = gpd.sjoin(gdf_iris_work, gdf_zone_analyse, how="inner", predicate="intersects")
-
-        if iris_zone.empty:
-            return None, "Hors Zone"
+        if iris_zone.empty: return None, "Hors Zone"
 
     except Exception as e:
         print(f"Erreur Radar: {e}")
         return None, "Erreur Géom"
 
-    # --- 3. IDENTIFICATION DU DÉPARTEMENT ---
-    # Création de la colonne CODE_DEPT si absente
+    # --- 3. DÉFINITION DU BENCHMARK (Comparatif) ---
+
+    # On récupère le département majoritaire de la zone pour situer géographiquement
     if 'CODE_DEPT' not in iris_zone.columns:
         iris_zone['CODE_DEPT'] = iris_zone['IRIS'].astype(str).str[:2]
         gdf_iris_work['CODE_DEPT'] = gdf_iris_work['IRIS'].astype(str).str[:2]
 
-    # Trouver le département majoritaire
-    if iris_zone['CODE_DEPT'].mode().empty:
-        return None, "Inconnu"
+    if iris_zone['CODE_DEPT'].mode().empty: return None, "Inconnu"
+    code_dept_local = iris_zone['CODE_DEPT'].mode()[0]
 
-    code_dept_ref = iris_zone['CODE_DEPT'].mode()[0]
+    df_ref = pd.DataFrame()
+    nom_ref_display = "Comparatif"
 
-    # Traduction Code -> Nom (ex: 33 -> Gironde)
-    nom_dept_display = f"Département {code_dept_ref}"
-    if df_communes_ref is not None and not df_communes_ref.empty:
-        # On cherche le nom dans le référentiel commune chargé
-        # On s'assure que le type (str/int) correspond
-        df_communes_ref['Num_Dep'] = df_communes_ref['Num_Dep'].astype(str)
-        match = df_communes_ref[df_communes_ref['Num_Dep'] == str(code_dept_ref)]
-        if not match.empty:
-            nom_reel = match.iloc[0]['Nom_Dep']
-            nom_dept_display = f"{nom_reel} ({code_dept_ref})"
+    # LOGIQUE DE SÉLECTION DU PÉRIMÈTRE
+    if niveau_comparaison == "France":
+        df_ref = gdf_iris_work  # On prend tout le fichier
+        nom_ref_display = "Moyenne France"
 
-    # Création du DataFrame de référence (Tout le département)
-    df_dept = gdf_iris_work[gdf_iris_work['CODE_DEPT'] == code_dept_ref].copy()
+    elif niveau_comparaison == "Région":
+        # On doit trouver la région du département local
+        nom_region = "Inconnue"
+        if df_communes_ref is not None:
+            df_communes_ref['Num_Dep'] = df_communes_ref['Num_Dep'].astype(str).str.zfill(2)
+            match = df_communes_ref[df_communes_ref['Num_Dep'] == str(code_dept_local)]
+            if not match.empty:
+                nom_region = match.iloc[0]['Nom_Region']
+                # On filtre tous les départements de cette région
+                deps_region = df_communes_ref[df_communes_ref['Nom_Region'] == nom_region]['Num_Dep'].unique()
+                df_ref = gdf_iris_work[gdf_iris_work['CODE_DEPT'].isin(deps_region)]
 
-    # --- 4. CALCUL DES RATIOS (Dynamique) ---
+        if df_ref.empty:  # Fallback si échec
+            df_ref = gdf_iris_work[gdf_iris_work['CODE_DEPT'] == code_dept_local]
+
+        nom_ref_display = f"Région {nom_region}"
+
+    else:  # Par défaut : Département
+        df_ref = gdf_iris_work[gdf_iris_work['CODE_DEPT'] == code_dept_local]
+        nom_dept_label = code_dept_local
+        if df_communes_ref is not None:
+            match = df_communes_ref[df_communes_ref['Num_Dep'] == str(code_dept_local)]
+            if not match.empty: nom_dept_label = match.iloc[0]['Nom_Dep']
+        nom_ref_display = f"Dépt {nom_dept_label}"
+
+    # --- 4. CALCUL DES RATIOS ---
     stats = []
 
     for key in metriques_demandees:
+        key_lookup = key
         if key not in CONFIG_METRIQUES_DB:
-            continue
+            if key == "Retraités":
+                key_lookup = "Retraités"
+            elif key == "Retraites":
+                key_lookup = "Retraites"
+            else:
+                continue
+        if key_lookup not in CONFIG_METRIQUES_DB: continue
 
-        label, num_col, den_col, is_revenu = CONFIG_METRIQUES_DB[key]
+        label, num_col, den_col, is_revenu = CONFIG_METRIQUES_DB[key_lookup]
         vals = {}
 
-        for scope_name, df_scope in [("Zone", iris_zone), ("Departement", df_dept)]:
+        # On boucle sur la Zone Locale (iris_zone) et le Benchmark (df_ref)
+        for scope_name, df_scope in [("Zone", iris_zone), ("Reference", df_ref)]:
             valeur = 0
-
-            # A. Cas REVENUS (Moyenne)
             if is_revenu:
-                if num_col in df_scope.columns:
-                    valeur = df_scope[num_col].mean()
-
-            # B. Cas RATIOS (%)
+                if num_col in df_scope.columns: valeur = df_scope[num_col].mean()
             else:
-                # B1. Calcul Dénominateur
                 total_den = 0
                 if den_col and den_col in df_scope.columns:
                     total_den = df_scope[den_col].sum()
                 elif den_col == "Population_totale":
-                    # Reconstruction de secours si colonne absente
                     cols_pop = ['Pop_15_24_ans', 'Pop_25_54_ans', 'Pop_55_79_ans', 'Pop_80_ans_plus']
                     cols_exist = [c for c in cols_pop if c in df_scope.columns]
                     total_den = df_scope[cols_exist].sum().sum()
 
-                # B2. Calcul Numérateur
                 total_num = 0
                 if isinstance(num_col, list):
-                    # Somme de plusieurs colonnes (ex: Seniors)
                     cols_ok = [c for c in num_col if c in df_scope.columns]
                     total_num = df_scope[cols_ok].sum().sum()
-                else:
-                    if num_col in df_scope.columns:
-                        total_num = df_scope[num_col].sum()
+                elif num_col in df_scope.columns:
+                    total_num = df_scope[num_col].sum()
 
-                # B3. Pourcentage
-                if total_den > 0:
-                    valeur = (total_num / total_den) * 100
+                if total_den > 0: valeur = (total_num / total_den) * 100
 
             vals[scope_name] = valeur
 
-        # Calcul Indice 100
         val_z = vals["Zone"]
-        val_d = vals["Departement"]
+        val_ref = vals["Reference"]
+
+        # Indice 100 basé sur la Référence choisie
         indice = 100
-        if pd.notnull(val_d) and val_d > 0:
-            indice = (val_z / val_d) * 100
+        if pd.notnull(val_ref) and val_ref > 0: indice = (val_z / val_ref) * 100
 
         stats.append({
             'Metrique': label,
             'Zone': val_z if pd.notnull(val_z) else 0,
-            'Departement': val_d if pd.notnull(val_d) else 0,
+            'Departement': val_ref if pd.notnull(val_ref) else 0,
+            # On garde le nom de clé 'Departement' pour compatibilité graphique
             'Indice_100': indice if pd.notnull(indice) else 0
         })
 
-    return pd.DataFrame(stats), nom_dept_display
+    return pd.DataFrame(stats), nom_ref_display
 
 def calculer_cannibalisation(zone_analysee_geom, gdf_reseau_existant, buffer_existant_m=2000):
     """
@@ -1087,7 +1146,6 @@ def estimer_valeur_portefeuille(df, cout_m2_defaut=2000, valeur_forfaitaire=3000
 
     return df
 
-
 def _get_coef_vulnerabilite(naf_code):
     """
     PRIORITÉ 2 : Helper pour le coefficient sectoriel.
@@ -1103,7 +1161,6 @@ def _get_coef_vulnerabilite(naf_code):
         return 1.2
     # Services (Résilient)
     return 0.8
-
 
 def calculer_pertes_sectorielles(gdf, scenario, col_naf=None):
     """
@@ -1160,7 +1217,6 @@ def calculer_pertes_sectorielles(gdf, scenario, col_naf=None):
     gdf['perte_estimee'] = pertes
     gdf['coef_vulnerabilite'] = coefs
     return gdf
-
 
 def estimer_empreinte_carbone(df, col_naf=None):
     """
