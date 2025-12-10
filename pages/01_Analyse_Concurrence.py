@@ -62,12 +62,12 @@ def _preparer_et_filtrer_gdf_risque(gdf_source, nom_risque, risque_selectionne, 
 
 
 def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients, gdf_socio_filtre, indicateur,
-                                    nom_indicateur, poi_selectionnes_sidebar, gdf_inondations, gdf_rga, ref_lat=None,
-                                    ref_lon=None, ref_nom=None,
+                                    nom_indicateur, poi_selectionnes_sidebar, gdf_inondations, gdf_rga,
+                                    ref_lat=None, ref_lon=None, ref_nom=None,
                                     engine=None, code_naf=None, scope=None, scope_value=None, ville_ref=None,
-                                    df_communes=None):  # Ajout df_communes
+                                    df_communes=None):
     """
-    Fonction principale d'affichage : KPIs -> Carte -> Radar.
+    Fonction principale d'affichage : KPIs -> Carte (Avec Contrôles intégrés) -> Radar.
     """
     st.markdown("---")
 
@@ -130,22 +130,31 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
 
     st.markdown("---")
 
-    # --- 2. CARTE INTERACTIVE ---
-    col_map_ctrl, col_map_visu = st.columns([1, 3])
+    # --- 2. CARTE INTERACTIVE (AVEC CONTRÔLES INTÉGRÉS) ---
+    st.subheader(f"Carte ({source_name})")
 
-    with col_map_ctrl:
-        st.subheader(f"Carte ({source_name})")
+    # >>> RESTAURATION DES CONTRÔLES AU-DESSUS DE LA CARTE <<<
+    # On utilise des colonnes pour aligner les options proprement sans perdre de place verticale
+    c_mode, c_param = st.columns([1, 2])
 
+    with c_mode:
         mode_affichage = st.radio(
-            "Mode d'affichage :",
+            "Mode d'analyse :",
             ('Points', 'Cercles', 'Isochrones'),
-            key=f"mode_aff_{source_name}"
+            horizontal=True,  # Affichage compact en ligne
+            key=f"mode_aff_local_{source_name}"
         )
-        rayon_cercles, temps_isochrones = 1000, 10
+
+    rayon_cercles = 1000
+    temps_isochrones = 10
+
+    with c_param:
         if mode_affichage == 'Cercles':
-            rayon_cercles = st.slider("Rayon (m) :", 100, 5000, 1000, 100, key=f"ray_{source_name}")
+            rayon_cercles = st.slider("Rayon d'influence (m) :", 100, 5000, 1000, 100, key=f"ray_local_{source_name}")
         elif mode_affichage == 'Isochrones':
-            temps_isochrones = st.slider("Temps (min) :", 2, 20, 10, 1, key=f"tps_{source_name}")
+            temps_isochrones = st.slider("Temps de trajet (min) :", 2, 20, 10, 1, key=f"tps_local_{source_name}")
+        else:
+            st.info("Visualisation simple des points.")
 
     # Centrage Carte
     if ref_lat and ref_lon:
@@ -171,43 +180,44 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
             if liste_gdf_poi_non_vides:
                 gdf_poi_final = pd.concat(liste_gdf_poi_non_vides, ignore_index=True)
 
-    with col_map_visu:
-        map_object, legend_enseignes, legend_socio_color, legend_socio_single = creer_carte_enrichie(
-            gdf_etablissements=gdf_resultats,
-            lat_centre=lat_centre, lon_centre=lon_centre,
-            gdf_socio=gdf_socio_filtre, colonne_socio=indicateur, nom_indicateur_socio=nom_indicateur,
-            gdf_poi=gdf_poi_final, gdf_inondations=gdf_inondations, gdf_rga=gdf_rga,
-            mode_affichage_etablissements=mode_affichage if mode_affichage != 'Cercles' else 'Cercles d\'influence',
-            rayon_cercles=rayon_cercles, temps_isochrones=temps_isochrones,
-            df_coefficients=df_coefficients, ref_lat=ref_lat, ref_lon=ref_lon, ref_nom=ref_nom
-        )
-        st_folium(map_object, width=None, height=500, returned_objects=[], key=f"map_{source_name}")
+    # Création de la carte avec les paramètres locaux
+    map_object, legend_enseignes, legend_socio_color, legend_socio_single = creer_carte_enrichie(
+        gdf_etablissements=gdf_resultats,
+        lat_centre=lat_centre, lon_centre=lon_centre,
+        gdf_socio=gdf_socio_filtre, colonne_socio=indicateur, nom_indicateur_socio=nom_indicateur,
+        gdf_poi=gdf_poi_final, gdf_inondations=gdf_inondations, gdf_rga=gdf_rga,
+        mode_affichage_etablissements=mode_affichage if mode_affichage != 'Cercles' else 'Cercles d\'influence',
+        rayon_cercles=rayon_cercles, temps_isochrones=temps_isochrones,
+        df_coefficients=df_coefficients, ref_lat=ref_lat, ref_lon=ref_lon, ref_nom=ref_nom
+    )
 
-        if legend_enseignes:
-            with st.expander("Voir la légende détaillée"):
-                for nom, color in legend_enseignes.items():
-                    st.markdown(f'<span style="color:{color};">●</span> {nom}', unsafe_allow_html=True)
+    # Affichage pleine largeur
+    st_folium(map_object, width=None, height=500, returned_objects=[], key=f"map_{source_name}")
+
+    if legend_enseignes:
+        with st.expander("Voir la légende détaillée"):
+            for nom, color in legend_enseignes.items():
+                st.markdown(f'<span style="color:{color};">●</span> {nom}', unsafe_allow_html=True)
 
     # =========================================================
-    # 3. RADAR & PROFIL TYPE (NOUVEAU LAYOUT + COMPARATIF)
+    # 3. RADAR & PROFIL TYPE
     # =========================================================
     if not gdf_resultats.empty and 'dict_geodatas' in st.session_state:
         st.markdown("---")
-        st.subheader("🧬 Profil Type de la Clientèle Ciblée")
+        st.subheader("🧬 Profil Type de la Clientèle")
 
-        # --- ETAPE A : PARAMÈTRES (HAUT, PLEINE LARGEUR) ---
+        # --- ETAPE A : PARAMÈTRES ---
         with st.container(border=True):
             col_titre_param, col_slider_param, col_comp_param = st.columns([1, 2, 1])
 
             with col_titre_param:
-                st.write("**Paramètres d'analyse**")
+                st.write("**Paramètres Radar**")
                 st.caption(f"Calculé sur les {len(gdf_resultats)} points.")
 
             with col_slider_param:
-                # Le slider est persistant grâce au st.session_state géré dans interface.py
+                # Le slider est persistant grâce au st.session_state géré
                 rayon_km = st.slider("Rayon d'analyse (km)", 1, 20, 3, key=f"slider_radar_{source_name}")
 
-            # NOUVEAU : Sélecteur de Comparaison
             with col_comp_param:
                 niveau_comp = st.selectbox(
                     "Comparer à :",
@@ -220,12 +230,13 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
             gdf_buffers = gdf_resultats.to_crs("EPSG:2154").buffer(rayon_km * 1000)
             zone_globale_concurrents = gdf_buffers.unary_union
             zone_analyse_geom = \
-            gpd.GeoDataFrame(geometry=[zone_globale_concurrents], crs="EPSG:2154").to_crs("EPSG:4326").geometry.iloc[0]
+                gpd.GeoDataFrame(geometry=[zone_globale_concurrents], crs="EPSG:2154").to_crs(
+                    "EPSG:4326").geometry.iloc[0]
 
-            # 2. Calcul Indicateurs (Avec nouveau param niveau_comp)
+            # 2. Calcul Indicateurs
             metriques_concurrence = ["Revenus", "Jeunes", "Actifs", "Seniors", "Retraités", "Cadres", "Ouvriers"]
 
-            # Important: Passer df_communes pour le mapping Région
+            # Appel fonction radar avec les bons paramètres
             df_radar, nom_ref = calculer_comparatif_radar(
                 st.session_state['dict_geodatas']['IRIS'],
                 zone_analyse_geom,
@@ -236,17 +247,17 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
 
             if df_radar is not None and not df_radar.empty:
 
-                # --- ETAPE B : CONTENU (2 COLONNES) ---
+                # --- ETAPE B : AFFICHAGE ---
                 col_radar, col_kpis = st.columns([1.5, 1])
 
-                # --- B1. GAUCHE : GRAPHIQUE RADAR ---
+                # --- B1. GAUCHE : RADAR ---
                 with col_radar:
                     fig = go.Figure()
 
-                    # Trace Ref (Moyenne du Dept/Region/France)
+                    # Trace Ref
                     fig.add_trace(go.Scatterpolar(
                         r=[100] * len(df_radar), theta=df_radar['Metrique'],
-                        fill=None, name=f"Ref ({nom_ref})",  # Nom Dynamique
+                        fill=None, name=f"Ref ({nom_ref})",
                         line_color='gray', line_dash='dot', hoverinfo='skip'
                     ))
                     # Trace Zone
@@ -268,12 +279,11 @@ def _afficher_resultats_concurrence(gdf_resultats, source_name, df_coefficients,
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
-                # --- B2. DROITE : TOP 3 ÉCARTS ---
+                # --- B2. DROITE : TOP ÉCARTS ---
                 with col_kpis:
                     st.markdown("#### 💡 Spécificités")
                     st.caption(f"Top 3 écarts vs {nom_ref}")
 
-                    # Tri par écart absolu
                     df_radar['delta'] = df_radar['Indice_100'] - 100
                     df_radar['delta_abs'] = df_radar['delta'].abs()
                     top_3 = df_radar.sort_values('delta_abs', ascending=False).head(3)
@@ -329,6 +339,8 @@ with st.sidebar:
 
     # 3. Risques
     risque_selectionne, regions_filtrees, departements_filtres = interface_selection_risques(df_communes)
+
+    # 4. NOTE: J'ai retiré les contrôles carte d'ici pour les remettre dans la page principale
 
 # --- PRÉPARATION CALQUES ---
 gdf_inondations_a_afficher = _preparer_et_filtrer_gdf_risque(

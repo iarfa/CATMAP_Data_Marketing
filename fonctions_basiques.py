@@ -7,8 +7,8 @@ import numpy as np
 import geopandas as gpd
 import sqlalchemy
 import re
-
-
+from shapely.geometry import shape, Point, Polygon
+import os
 # ==============================================
 # SECTION : CONNEXION BASE DE DONNÉES
 # ==============================================
@@ -939,42 +939,6 @@ def calculer_comparatif_radar(gdf_iris, zone_geom, metriques_demandees=None, df_
 
     return pd.DataFrame(stats), nom_ref_display
 
-def calculer_cannibalisation(zone_analysee_geom, gdf_reseau_existant, buffer_existant_m=2000):
-    """
-    Calcule le taux de chevauchement entre la nouvelle zone et le réseau existant.
-    """
-    if zone_analysee_geom is None or gdf_reseau_existant.empty:
-        return 0, None
-
-    # 1. On crée les zones du réseau existant (Buffers simples pour aller vite)
-    # Idéalement, on ferait des isochrones, mais le buffer est un excellent proxy rapide
-    try:
-        gdf_reseau_buffers = gdf_reseau_existant.to_crs("EPSG:2154").buffer(buffer_existant_m)
-        zone_reseau_union = gdf_reseau_buffers.unary_union
-
-        # On repasse en GPS pour l'intersection avec la zone analysée (si elle est en GPS)
-        # Attention : zone_analysee_geom doit être un objet Shapely, on le met dans un GDF pour gérer les CRS
-        gdf_zone_new = gpd.GeoDataFrame({'geometry': [zone_analysee_geom]}, crs="EPSG:4326").to_crs("EPSG:2154")
-        area_new_total = gdf_zone_new.area.iloc[0]
-
-        # 2. Calcul de l'intersection (Recouvrement)
-        # Intersection géométrique
-        intersection = gdf_zone_new.intersection(zone_reseau_union)
-
-        if intersection.is_empty.all():
-            return 0, None
-
-        area_intersection = intersection.area.iloc[0]
-
-        # 3. Ratio
-        ratio_cannibalisation = (area_intersection / area_new_total) * 100
-
-        return ratio_cannibalisation, intersection.to_crs("EPSG:4326").iloc[0]
-
-    except Exception as e:
-        print(f"Erreur Cannibalisation : {e}")
-        return 0, None
-
 def calculer_score_global(kpis_socio, kpis_immo, kpis_risques, kpis_concurrence):
     """
     Génère un score sur 100 basé sur 4 piliers.
@@ -1248,3 +1212,139 @@ def estimer_empreinte_carbone(df, col_naf=None):
     df['emission_tco2'] = carbones
     df['categorie_transition'] = labels
     return df
+
+# ==============================================
+# 🆕 SECTION : NOUVELLES FONCTIONS CANNIBALISATION (BDD)
+# ==============================================
+
+@st.cache_data(show_spinner="Recherche du réseau existant...")
+def recuperer_reseau_existant(_engine, nom_enseigne, lat_cible, lon_cible, rayon_km=15):
+    """
+    Récupère les établissements d'une même enseigne via SQL (ILIKE)
+    dans un rayon donné autour de la cible (PostGIS ST_DWithin).
+    """
+    if not _engine or not nom_enseigne:
+        return gpd.GeoDataFrame()
+
+    motif_recherche = f"%{nom_enseigne.strip()}%"
+
+    query = sqlalchemy.text("""
+        SELECT siret, denominationunitelegale, adresse, latitude, longitude
+        FROM etablissements
+        WHERE denominationunitelegale ILIKE :motif
+        AND latitude IS NOT NULL AND longitude IS NOT NULL
+        AND ST_DWithin(
+            ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography,
+            ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
+            :rayon_metres
+        )
+    """)
+
+    params = {"motif": motif_recherche, "lon": lon_cible, "lat": lat_cible, "rayon_metres": rayon_km * 1000}
+
+    try:
+        with _engine.connect() as conn:
+            df_res = pd.read_sql_query(query, conn, params=params)
+        if df_res.empty: return gpd.GeoDataFrame()
+        return transfo_geodataframe(df_res, 'longitude', 'latitude')
+    except Exception as e:
+        st.error(f"Erreur Réseau SQL : {e}")
+        return gpd.GeoDataFrame()
+
+
+def calculer_score_cannibalisation_isochrone(zone_nouvelle_geom, gdf_reseau, minutes_isochrone=10):
+    """
+    Calcule le % de chevauchement entre la nouvelle zone et les isochrones du réseau existant.
+    """
+    if zone_nouvelle_geom is None or gdf_reseau.empty:
+        return 0, gpd.GeoDataFrame()
+
+    # Import local pour éviter boucle d'import (si fonctions_cartographie importe fonctions_basiques)
+    from fonctions_cartographie import calculer_isochrone_et_cacher
+
+    geoms_reseau = []
+    # On limite aux 10 plus proches pour ne pas saturer l'API ORS
+    for _, row in gdf_reseau.head(10).iterrows():
+        iso_json = calculer_isochrone_et_cacher(row.geometry.x, row.geometry.y, minutes_isochrone * 60)
+        if iso_json:
+            geoms_reseau.append(shape(iso_json['geometry']))
+
+    if not geoms_reseau: return 0, gpd.GeoDataFrame()
+
+    gdf_isos_reseau = gpd.GeoDataFrame({'geometry': geoms_reseau}, crs="EPSG:4326")
+    union_reseau = gdf_isos_reseau.unary_union
+
+    zone_new_l93 = gpd.GeoDataFrame({'geometry': [zone_nouvelle_geom]}, crs="EPSG:4326").to_crs("EPSG:2154")
+    zone_reseau_l93 = gpd.GeoDataFrame({'geometry': [union_reseau]}, crs="EPSG:4326").to_crs("EPSG:2154")
+
+    intersection = gpd.overlay(zone_new_l93, zone_reseau_l93, how='intersection')
+
+    if intersection.empty: return 0, gdf_isos_reseau
+
+    taux = (intersection.area.sum() / zone_new_l93.area.iloc[0]) * 100
+    return round(taux, 1), gdf_isos_reseau
+
+
+@st.cache_resource
+def _charger_moteur_climat():
+    """
+    Charge le fichier Parquet en mémoire.
+    Plus besoin de 'tree', Pandas est assez rapide pour 9000 lignes.
+    """
+    path = "data/climat_2050_optimized.parquet"
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_parquet(path)
+        return df
+    except Exception as e:
+        print(f"Erreur chargement climat: {e}")
+        return None
+
+
+def projeter_climat_2050(target_lat, target_lon):
+    """
+    Trouve le point météo le plus proche via un calcul de distance simple.
+    """
+    df_clim = _charger_moteur_climat()
+
+    # 1. Mode Secours (Si pas de fichier)
+    # Renvoie des 0 pour ne pas faire planter l'app
+    zero_data = {"Jours Canicule": 0, "Nuits Tropicales": 0, "Sécheresse Sol": 0, "Pluie Extrême": 0}
+    if df_clim is None or df_clim.empty:
+        return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
+
+    # 2. Calcul de distance (Pythagore simple)
+    # On cherche le point qui minimise la distance au carré
+    # (lat - target_lat)^2 + (lon - target_lon)^2
+    # C'est instantané sur 9000 lignes avec Pandas vectorisé.
+
+    distances = (df_clim['lat_round'] - target_lat) ** 2 + (df_clim['lon_round'] - target_lon) ** 2
+    idx_min = distances.idxmin()
+    min_dist = distances.min()
+
+    # 3. Sécurité : Si le point le plus proche est trop loin (> 0.2 degrés carré approx)
+    # Cela évite de donner la météo de Brest pour un point à New York
+    if min_dist > 0.05:  # Environ 20-30km de tolérance
+        return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
+
+    # 4. On récupère la ligne gagnante
+    row = df_clim.loc[idx_min]
+
+    # 5. Construction du résultat
+    return {
+        "RCP 4.5": {
+            "Jours Canicule": int(row.get("RCP45_Jours Canicule", 0)),
+            "Nuits Tropicales": int(row.get("RCP45_Nuits Tropicales", 0)),
+            "Sécheresse Sol": int(row.get("RCP45_Sécheresse Sol", 0)),
+            "Pluie Extrême": int(row.get("RCP45_Pluie Extrême", 0))
+        },
+        "RCP 8.5": {
+            "Jours Canicule": int(row.get("RCP85_Jours Canicule", 0)),
+            "Nuits Tropicales": int(row.get("RCP85_Nuits Tropicales", 0)),
+            "Sécheresse Sol": int(row.get("RCP85_Sécheresse Sol", 0)),
+            "Pluie Extrême": int(row.get("RCP85_Pluie Extrême", 0))
+        }
+    }
+
+
