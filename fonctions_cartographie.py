@@ -10,9 +10,7 @@ import branca.colormap as cm
 from streamlit_folium import st_folium
 from shapely.geometry import shape, box, Point
 from folium.plugins import Fullscreen, HeatMap
-
-# On importe la config locale (si besoin pour les icônes)
-from config import POI_CONFIG
+from config import LOCOMOTIVES_CONFIG
 from fonctions_basiques import transfo_geodataframe
 
 
@@ -361,7 +359,9 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
                              gdf_socio=None, colonne_socio=None, nom_indicateur_socio=None,
                              gdf_batiments=None, gdf_inondations=None, gdf_rga=None,
                              nom_point_central="Cible", adresse_point_central="", analysis_mode='Isochrones',
-                             df_dvf=None, dvf_type_filtre="Tous", mode_affichage_dvf="Points"):
+                             df_dvf=None, dvf_type_filtre="Tous", mode_affichage_dvf="Points",
+                             gdf_reseau_cannibale=None):  # <--- AJOUT DU PARAMÈTRE ICI
+
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=15, tiles="OpenStreetMap")
 
     # =========================================================
@@ -409,31 +409,61 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
     ).add_to(m)
 
     # =========================================================
-    # 5. BÂTIMENTS (Coloration Dynamique selon Risque)
+    # 5. RÉSEAU EXISTANT (CANNIBALISATION) - NOUVEAU BLOC
+    # =========================================================
+    if gdf_reseau_cannibale is not None and not gdf_reseau_cannibale.empty:
+        fg_res = folium.FeatureGroup(name="Réseau Existant", show=True).add_to(m)
+
+        for _, r in gdf_reseau_cannibale.iterrows():
+            geom = r.geometry
+
+            # GESTION ROBUSTE : Point ou Polygone ?
+            if geom.geom_type == 'Point':
+                lat_pt = geom.y
+                lon_pt = geom.x
+            else:
+                # Si c'est un Polygone, on prend son centre (centroïde) pour placer le point
+                lat_pt = geom.centroid.y
+                lon_pt = geom.centroid.x
+
+            nom_mag = r.get('nom', 'Magasin Réseau')
+
+            folium.CircleMarker(
+                [lat_pt, lon_pt],
+                radius=6,
+                color='purple',
+                fill=True,
+                fill_color='purple',
+                fill_opacity=0.9,
+                tooltip=f"Réseau: {nom_mag}",
+                popup=folium.Popup(f"<b>{nom_mag}</b><br>Magasin Existant", max_width=200)
+            ).add_to(fg_res)
+
+            # Optionnel : Si c'est un polygone, on affiche aussi la forme en transparence
+            if geom.geom_type != 'Point':
+                folium.GeoJson(
+                    geom,
+                    style_function=lambda x: {'color': 'purple', 'fillColor': 'purple', 'weight': 1, 'fillOpacity': 0.1}
+                ).add_to(fg_res)
+
+    # =========================================================
+    # 6. BÂTIMENTS (Coloration Dynamique selon Risque)
     # =========================================================
     if gdf_batiments is not None and not gdf_batiments.empty:
         fg_bat = folium.FeatureGroup(name="Bâtiments (Audit)", show=True).add_to(m)
 
-        # Fonction de style dynamique
         def style_batiment(feature):
             props = feature['properties']
-
-            # Par défaut : Bleu (Sain)
-            color = '#3498db'
+            color = '#3498db'  # Bleu par défaut
             fill_opacity = 0.5
             weight = 1
 
-            # HIERARCHIE DES RISQUES (Rouge > Orange > Bleu)
-
-            # 1. Inondation (Priorité absolue) -> ROUGE
             if props.get('has_Inondation'):
-                color = '#e74c3c'
+                color = '#e74c3c'  # Rouge
                 fill_opacity = 0.8
                 weight = 2
-
-            # 2. Argile (RGA) -> ORANGE
             elif props.get('has_Argile'):
-                color = '#e67e22'
+                color = '#e67e22'  # Orange
                 fill_opacity = 0.7
 
             return {
@@ -443,15 +473,11 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
                 'fillOpacity': fill_opacity
             }
 
-        # Info-bulle dynamique (Tooltip)
         tooltip_fields = ['surface_m2']
         tooltip_aliases = ['Surface:']
-
-        # On ajoute les infos risques si elles existent dans les données
         if 'niveau_Inondation' in gdf_batiments.columns:
             tooltip_fields.append('niveau_Inondation')
             tooltip_aliases.append('Inondation:')
-
         if 'niveau_Argile' in gdf_batiments.columns:
             tooltip_fields.append('niveau_Argile')
             tooltip_aliases.append('Argile:')
@@ -463,11 +489,10 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
         ).add_to(fg_bat)
 
     # =========================================================
-    # 6. POI
+    # 7. POI
     # =========================================================
     if gdf_poi_trouves is not None and not gdf_poi_trouves.empty:
         fg_poi = folium.FeatureGroup(name="POI Zone", show=True).add_to(m)
-        # Import local pour éviter les cycles si besoin, ou utiliser l'argument passé
         from config import POI_CONFIG
 
         for _, r in gdf_poi_trouves.iterrows():
@@ -544,3 +569,50 @@ def analyser_environnement_naturel(bbox):
     except Exception as e:
         print(f"Erreur analyse nature : {e}")
         return 9999, 0.0
+
+
+def analyser_locomotives(zone_geom):
+    """
+    Scanne la zone pour trouver les générateurs de trafic (Locomotives).
+    Retourne :
+    - un DataFrame détaillé
+    - un Score total (Trafic Score)
+    """
+    if zone_geom is None:
+        return pd.DataFrame(), 0
+
+    bbox = zone_geom.bounds
+    resultats = []
+    score_total = 0
+
+    # On boucle sur chaque type de locomotive défini dans la config
+    for nom_cat, config in LOCOMOTIVES_CONFIG.items():
+        tags = config['tags']
+        poids = config['poids']
+
+        # On utilise la fonction existante pour interroger OSM
+        # Note : rechercher_poi_osm renvoie un GDF brut
+        gdf_poi = rechercher_poi_osm(bbox, tags)
+
+        if not gdf_poi.empty:
+            # FILTRE SPATIAL : On ne garde que ce qui est DANS la zone (isochrone)
+            # Car rechercher_poi_osm cherche dans le carré (bbox)
+            gdf_dans_zone = gdf_poi[gdf_poi.within(zone_geom)]
+
+            count = len(gdf_dans_zone)
+            if count > 0:
+                score_cat = count * poids
+                score_total += score_cat
+                resultats.append({
+                    "Catégorie": nom_cat,
+                    "Nombre": count,
+                    "Poids Unit.": poids,
+                    "Impact Trafic": score_cat,
+                    "Exemples": ", ".join(gdf_dans_zone['name'].head(3).tolist())
+                })
+
+    if not resultats:
+        return pd.DataFrame(), 0
+
+    df_res = pd.DataFrame(resultats).sort_values("Impact Trafic", ascending=False)
+    return df_res, score_total
