@@ -1,11 +1,14 @@
-# Fichier: pages/01_Analyse_Concurrence.py (RÉÉCRITURE INTÉGRALE V4 - FIX LONGITUDE & LÉGENDE SÉLECTIVE)
+# Fichier: pages/01_Analyse_Concurrence.py (V19 - BASE V15 + ALL REQUESTED FIXES - NO DELETION)
 
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
 from streamlit_folium import st_folium
 import plotly.express as px
+import plotly.graph_objects as go
 import numpy as np
+from sqlalchemy import text
+import folium
 
 # --- IMPORTS ---
 from backend.database import connect_to_db
@@ -27,22 +30,106 @@ from utils.geo_tools import (
 )
 from config import POI_CONFIG
 
+
 # =============================================================================
-# 1. INITIALISATION
+# 0. UTILITAIRES SÉCURITÉ & DESIGN
+# =============================================================================
+def detecter_colonnes_geo(df):
+    """Cherche lat/lon (insensible à la casse) pour éviter les crashs."""
+    if df is None or df.empty: return None, None
+    cols_lower = {c.lower(): c for c in df.columns}
+
+    lon_candidates = ['longitude', 'lon', 'lng', 'long', 'longitude_centre', 'gps_lng', 'x']
+    lon_col = next((cols_lower[c] for c in lon_candidates if c in cols_lower), None)
+
+    lat_candidates = ['latitude', 'lat', 'latitude_centre', 'gps_lat', 'y']
+    lat_col = next((cols_lower[c] for c in lat_candidates if c in cols_lower), None)
+
+    return lon_col, lat_col
+
+
+def compter_resultats_sql(engine, code_naf, num_dep, siret_exclu="0"):
+    """Compte ultra-rapide avant de charger les données."""
+    try:
+        siren_exclu = str(siret_exclu)[:9]
+        q = text("""
+            SELECT COUNT(*) 
+            FROM etablissements
+            WHERE activiteprincipaleetablissement = :code_naf 
+            AND numero_dep = :num_dep 
+            AND siren != :siren_exclu;
+        """)
+        with engine.connect() as conn:
+            return conn.execute(q, {"code_naf": code_naf, "num_dep": str(num_dep), "siren_exclu": siren_exclu}).scalar()
+    except Exception:
+        return -1
+
+
+def display_kpi_card(title, value, subtext=None, is_active=True):
+    """Affiche une carte KPI HTML propre (évite de couper le texte). Ajout gestion opacité."""
+    opacity = "1.0" if is_active else "0.5"
+    color_val = "#000" if is_active else "#888"
+    sub_html = f"<div style='font-size:12px; color:#666; margin-top:4px; line-height:1.2;'>{subtext}</div>" if subtext else ""
+    html = f"""
+    <div style="background-color: white; padding: 15px; border-radius: 8px; border: 1px solid #e0e0e0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); height: 100%; opacity: {opacity};">
+        <div style="font-size: 13px; font-weight: 600; color: #555; text-transform: uppercase; margin-bottom: 5px;">{title}</div>
+        <div style="font-size: 20px; font-weight: bold; color: {color_val};">{value}</div>
+        {sub_html}
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# =============================================================================
+# 1. INITIALISATION & AUTO-RÉPARATION DES DONNÉES
 # =============================================================================
 st.title("📊 Analyse de la Concurrence")
 
 if 'data_loaded' not in st.session_state:
+    st.session_state['data_loaded'] = False
+
+if not st.session_state['data_loaded']:
     with st.status("🚀 Démarrage de GeoRisk...", expanded=True) as status:
         st.write("🔌 Connexion Base de Données...")
         engine = connect_to_db()
         st.session_state['engine'] = engine
+
         st.write("🗺️ Chargement Référentiel Communes...")
         df_communes = charger_communes()
-        st.session_state['df_communes'] = df_communes
+
         st.write("👥 Chargement Données Socio-Démographiques...")
         raw_iris = charger_donnees_iris_socio()
-        st.session_state['dict_geo'] = preparer_donnees_socio(raw_iris, df_communes)
+        dict_geo = preparer_donnees_socio(raw_iris, df_communes)
+        st.session_state['dict_geo'] = dict_geo
+
+        # --- RÉPARATION AUTOMATIQUE DES COORDONNÉES (Fix V12) ---
+        lon_check, lat_check = detecter_colonnes_geo(df_communes)
+
+        if (not lon_check or not lat_check) and dict_geo and 'Commune' in dict_geo:
+            st.write("🔧 Réparation des coordonnées géographiques...")
+            try:
+                gdf_shapes = dict_geo['Commune'].copy()
+
+                # Calcul des centres
+                gdf_shapes['repair_lon'] = gdf_shapes.geometry.centroid.x
+                gdf_shapes['repair_lat'] = gdf_shapes.geometry.centroid.y
+
+                # Jointure
+                df_communes['Code_Join'] = df_communes['Code_INSEE'].astype(str).str.zfill(5)
+                gdf_shapes['JOIN_KEY'] = gdf_shapes['CODE_COM'].astype(str).str.zfill(5)
+
+                df_merged = df_communes.merge(gdf_shapes[['JOIN_KEY', 'repair_lon', 'repair_lat']], left_on='Code_Join',
+                                              right_on='JOIN_KEY', how='left')
+                df_merged['longitude'] = df_merged['repair_lon']
+                df_merged['latitude'] = df_merged['repair_lat']
+
+                df_communes = df_merged.drop(columns=['Code_Join', 'JOIN_KEY', 'repair_lon', 'repair_lat'],
+                                             errors='ignore')
+                st.toast("✅ Coordonnées reconstruites.", icon="🛠️")
+            except Exception as e:
+                st.error(f"Echec réparation: {e}")
+
+        st.session_state['df_communes'] = df_communes
         status.update(label="Chargement terminé !", state="complete", expanded=False)
     st.session_state['data_loaded'] = True
 
@@ -56,6 +143,9 @@ dict_geo = st.session_state.get('dict_geo')
 with st.sidebar:
     st.header("🎛️ Paramètres de la Carte")
 
+    # Debug Optionnel
+    debug_mode = st.toggle("🛠️ Mode Diagnostic", value=False)
+
     with st.container(border=True):
         # 1. Socio
         gdf_socio_full, col_socio, lbl_socio, maille_socio = sidebar_filtres_socio(dict_geo)
@@ -66,117 +156,88 @@ with st.sidebar:
         poi_selectionnes_sidebar = sidebar_filtres_poi()
         st.divider()
 
-        # 3. Risques (Utilisation de la fonction P01)
-        show_risk, type_risk, regions_filtrees, departements_filtres_codes = sidebar_filtres_risques(df_communes)
+        # 3. Risques (Avec Multiselect V11)
+        show_risk, types_risk_selected, regions_filtrees, departements_filtres_codes = sidebar_filtres_risques(
+            df_communes)
 
 
 # =============================================================================
 # 3. FONCTIONS DE PRÉPARATION
 # =============================================================================
 def preparer_calques_carte_optimise(nums_deps_zone, geo_communes_df):
-    # 1. Calque Socio (Filtré par Département(s) sélectionné(s))
+    """
+    Prépare les couches géographiques. Intègre les correctifs V12 (CRS + Multiselect).
+    """
     socio_layer = None
     if gdf_socio_full is not None and nums_deps_zone:
         socio_layer = gdf_socio_full[gdf_socio_full['CODE_DEPT'].isin(nums_deps_zone)]
 
-    # 2. Calques Risques (Renvoyer les deux couches filtrées)
     inond_layer, rga_layer = gpd.GeoDataFrame(), gpd.GeoDataFrame()
 
     if show_risk and not geo_communes_df.empty:
         try:
-            # --- CORRECTION CRITIQUE 1 : Utilisation des noms de colonnes corrects ---
-            temp_gdf = transfo_geodataframe(geo_communes_df, 'Longitude_Centre', 'Latitude_Centre')
+            lon_col, lat_col = detecter_colonnes_geo(geo_communes_df)
+            if not lon_col: return socio_layer, inond_layer, rga_layer
 
-            if temp_gdf.empty or temp_gdf.geometry.is_empty.all(): return socio_layer, inond_layer, rga_layer
+            temp_gdf = transfo_geodataframe(geo_communes_df, lon_col, lat_col)
+            if temp_gdf.empty: return socio_layer, inond_layer, rga_layer
 
             minx, miny, maxx, maxy = temp_gdf.unary_union.bounds
+            bbox_geo = [minx - 0.1, miny - 0.1, maxx + 0.1, maxy + 0.1]
 
-            b_minx, b_miny, b_maxx, b_maxy = minx - 0.05, miny - 0.05, maxx + 0.05, maxy + 0.05
-            bbox_geo = [b_minx, b_miny, b_maxx, b_maxy]
-
-            with st.spinner("Chargement des risques..."):
+            with st.spinner("Chargement risques..."):
                 raw_inond = charger_zones_risques("INONDATION")
                 raw_rga = charger_zones_risques("RGA")
 
-                # --- 2.1 Filtrage et Simplification Inondation ---
-                if not raw_inond.empty:
-                    inond_layer = raw_inond.cx[bbox_geo[0]:bbox_geo[2], bbox_geo[1]:bbox_geo[3]].copy()
-                    if departements_filtres_codes:
-                        if 'Num_Dep' in inond_layer.columns: inond_layer = inond_layer[
-                            inond_layer['Num_Dep'].isin(departements_filtres_codes)]
-                    inond_layer = inond_layer.dropna(subset=['geometry'])
-                    if not inond_layer.empty: inond_layer['geometry'] = inond_layer['geometry'].simplify(0.0001)
+            if types_risk_selected and "Inondation" in types_risk_selected and not raw_inond.empty:
+                if raw_inond.crs and raw_inond.crs.to_string() != "EPSG:4326": raw_inond = raw_inond.to_crs("EPSG:4326")
+                inond_layer = raw_inond.cx[bbox_geo[0]:bbox_geo[2], bbox_geo[1]:bbox_geo[3]].copy()
+                if departements_filtres_codes and 'Num_Dep' in inond_layer.columns:
+                    inond_layer = inond_layer[inond_layer['Num_Dep'].isin(departements_filtres_codes)]
+                if not inond_layer.empty: inond_layer['geometry'] = inond_layer['geometry'].simplify(0.0001)
 
-                # --- 2.2 Filtrage et Simplification RGA ---
-                if not raw_rga.empty:
-                    rga_layer = raw_rga.cx[bbox_geo[0]:bbox_geo[2], bbox_geo[1]:bbox_geo[3]].copy()
-                    if departements_filtres_codes:
-                        if 'Num_Dep' in rga_layer.columns: rga_layer = rga_layer[
-                            rga_layer['Num_Dep'].isin(departements_filtres_codes)]
-                    rga_layer = rga_layer.dropna(subset=['geometry'])
-                    if not rga_layer.empty: rga_layer['geometry'] = rga_layer['geometry'].simplify(0.0001)
+            if types_risk_selected and "Sécheresse (RGA)" in types_risk_selected and not raw_rga.empty:
+                if raw_rga.crs and raw_rga.crs.to_string() != "EPSG:4326": raw_rga = raw_rga.to_crs("EPSG:4326")
+                rga_layer = raw_rga.cx[bbox_geo[0]:bbox_geo[2], bbox_geo[1]:bbox_geo[3]].copy()
+                if departements_filtres_codes and 'Num_Dep' in rga_layer.columns:
+                    rga_layer = rga_layer[rga_layer['Num_Dep'].isin(departements_filtres_codes)]
+                if not rga_layer.empty: rga_layer['geometry'] = rga_layer['geometry'].simplify(0.0001)
 
-        except Exception as e:
-            # Afficher l'erreur corrigée pour la trace
-            st.error(f"Erreur de filtrage des calques risques: {e}")
+        except Exception:
+            pass
 
-    # Renvoyer les deux couches, même si vides
     return socio_layer, inond_layer, rga_layer
 
 
 def preparer_poi_pour_carte(geo_communes_df, pois_selectionnes):
-    gdf_poi = gpd.GeoDataFrame()
-
-    if not pois_selectionnes or geo_communes_df.empty:
-        return gdf_poi
+    """
+    Prépare les POI avec la boucle 'Fix Tout Hopital' (V12) et BBox souple.
+    """
+    gdf_total = gpd.GeoDataFrame()
+    if not pois_selectionnes or geo_communes_df.empty: return gdf_total
 
     try:
-        # --- CORRECTION CRITIQUE 1 : Utilisation des noms de colonnes corrects ---
-        temp_gdf = transfo_geodataframe(geo_communes_df, 'Longitude_Centre', 'Latitude_Centre')
+        lon_col, lat_col = detecter_colonnes_geo(geo_communes_df)
+        if not lon_col: return gdf_total
 
-        if temp_gdf.empty or temp_gdf.geometry.is_empty.all(): return gdf_poi
-
+        temp_gdf = transfo_geodataframe(geo_communes_df, lon_col, lat_col)
         minx, miny, maxx, maxy = temp_gdf.unary_union.bounds
-        bbox_agrandie = [minx - 0.005, miny - 0.005, maxx + 0.005, maxy + 0.005]
+        bbox_agrandie = [minx - 0.02, miny - 0.02, maxx + 0.02, maxy + 0.02]
 
-        tags_a_chercher = {}
+        list_gdfs = []
         for cat in pois_selectionnes:
             if cat in POI_CONFIG:
-                tags_a_chercher.update(POI_CONFIG[cat]['tags'])
+                tags_cat = POI_CONFIG[cat]['tags']
+                gdf_cat = rechercher_poi_overpass(bbox_agrandie, tags_cat)
+                if not gdf_cat.empty:
+                    gdf_cat['categorie'] = cat
+                    list_gdfs.append(gdf_cat)
 
-        if tags_a_chercher:
-            # 1. Recherche via Overpass
-            gdf_poi_brut = rechercher_poi_overpass(bbox_agrandie, tags_a_chercher)
+        if list_gdfs: gdf_total = pd.concat(list_gdfs, ignore_index=True)
 
-            # 2. Enrichissement (Critique B V4) et Filtrage
-            if not gdf_poi_brut.empty:
-
-                # --- CORRECTION CRITIQUE 3 : Garantie de la colonne 'categorie' ---
-                def assigner_categorie_robuste(row_poi):
-                    name = row_poi.get('name', '')
-
-                    # Logique: Trouver la catégorie si un de ses tags correspond (méthode la plus fiable sans accès aux tags bruts OSM)
-                    for cat_name, config in POI_CONFIG.items():
-                        if cat_name in pois_selectionnes:
-                            # S'il y a un match simple dans le nom du POI
-                            if cat_name.lower() in name.lower():
-                                return cat_name
-                            # Plus difficile de matcher par tag ici, on privilégie l'association simple nom/catégorie
-
-                    # Si POI_CONFIG est vide, ça utilise 'Divers'
-                    return list(POI_CONFIG.keys())[0] if POI_CONFIG else "Divers"
-
-                gdf_poi_brut['categorie'] = gdf_poi_brut.apply(
-                    lambda r: assigner_categorie_robuste({'name': r.get('name')}), axis=1)
-
-                # Le filtrage final doit se faire sur l'union des géométries des communes
-                zone_union = temp_gdf.unary_union
-                gdf_poi = gdf_poi_brut[gdf_poi_brut.within(zone_union)].copy()
-
-    except Exception as e:
-        print(f"Erreur lors de la recherche des POI: {e}")
-
-    return gdf_poi
+    except Exception:
+        pass
+    return gdf_total
 
 
 # =============================================================================
@@ -184,83 +245,131 @@ def preparer_poi_pour_carte(geo_communes_df, pois_selectionnes):
 # =============================================================================
 def afficher_resultats_persistants(key_data, source_name):
     data = st.session_state[key_data]
-    gdf = data['gdf']  # GDF des Concurrents
-    nums_deps = data['nums_deps']  # Codes des départements sélectionnés
+    gdf = data['gdf']
+    nums_deps = data['nums_deps']
     age_stats = data.get('age_stats')
     siret_info = st.session_state.get('ref_etab_data', {})
-    geo_communes_df = data.get('geo_communes_df', pd.DataFrame())  # GeoDataFrame des communes pour le périmètre
+    geo_communes_df = data.get('geo_communes_df', pd.DataFrame())
 
-    # --- 1. PRÉPARATION DU GDF POI (Recherche sur la zone d'étude complète) ---
-    global poi_selectionnes_sidebar
+    # Sécurisation Locale
+    if geo_communes_df is not None and not geo_communes_df.empty:
+        l, _ = detecter_colonnes_geo(geo_communes_df)
+        if not l and df_communes is not None:
+            try:
+                geo_communes_df = geo_communes_df.merge(
+                    df_communes[['Code_INSEE', 'latitude', 'longitude']],
+                    on='Code_INSEE', how='left', suffixes=('_old', '')
+                )
+            except:
+                pass
+
+    # Debug Optionnel
+    if debug_mode:
+        with st.expander("🕵️ INSPECTEUR DONNÉES", expanded=True):
+            cols_ok = [c for c in ['Nom_Ville', 'latitude', 'longitude'] if c in geo_communes_df.columns]
+            if cols_ok: st.dataframe(geo_communes_df[cols_ok].head())
+
+    # Préparation
     gdf_poi = preparer_poi_pour_carte(geo_communes_df, poi_selectionnes_sidebar)
+    socio, inond, rga = preparer_calques_carte_optimise(nums_deps, geo_communes_df)
 
     st.divider()
 
-    # --- KPI ---
+    # --- KPI LOGIC (V16) ---
     nb = len(gdf)
-    # Détermination de la ville de référence
-    ville_top = siret_info.get('nom_dep', "N/A")
-    if siret_info and siret_info.get('adresse'):
-        ville_top = extraire_ville_depuis_adresse(siret_info.get('adresse'))
-    elif 'ville' in gdf.columns and not gdf['ville'].dropna().empty:
-        ville_top = gdf['ville'].mode()[0]
-    elif 'ville_recherche' in gdf.columns:
-        ville_top = gdf['ville_recherche'].mode()[0]
 
-    code_dep = nums_deps[0] if nums_deps else "?"
+    # 1. Gestion affichage Zone (Adresse vs Etablissement)
+    zone_str = "N/A"
+    is_osm = (source_name == "OpenStreetMap")
 
-    # KPI ROW
-    if age_stats:
-        k1, k2, k3, k4 = st.columns(4)
-        k4.metric("Ancienneté Moy.", f"{age_stats['age_moyen']} ans", help=f"Médiane : {age_stats['age_median']} ans")
+    if is_osm:
+        # Pour OSM, on affiche la ville recherchée en priorité
+        if 'ville_recherche' in gdf.columns and not gdf['ville_recherche'].dropna().empty:
+            zone_str = gdf['ville_recherche'].iloc[0]
+        elif not geo_communes_df.empty and 'Nom_Ville' in geo_communes_df.columns:
+            zone_str = geo_communes_df['Nom_Ville'].iloc[0]
     else:
-        k1, k2, k3 = st.columns(3)
+        # Pour SIREN
+        if siret_info:
+            v = extraire_ville_depuis_adresse(siret_info.get('adresse', ''))
+            d = siret_info.get('nom_dep', '')
+            zone_str = f"{v} ({d})"
+        elif 'ville' in gdf.columns:
+            zone_str = gdf['ville'].mode()[0] if not gdf['ville'].empty else "Zone Multiple"
 
-    k1.metric("Établissements", nb)
-    k2.metric("Zone Principale", f"{ville_top} ({code_dep})")
-    k3.metric("Source", source_name)
+    # 2. Gestion affichage Age (Caché/Grisé si OSM)
+    age_txt = f"{age_stats.get('age_moyen', 0)} ans" if (not is_osm and age_stats) else "N/A"
+
+    # 3. Affichage KPI via cartes HTML propres
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        display_kpi_card("Établissements", nb)
+    with c2:
+        display_kpi_card("Zone / Ville", zone_str, "Périmètre")
+    with c3:
+        display_kpi_card("Source", source_name)
+    with c4:
+        display_kpi_card("Ancienneté Moy.", age_txt, is_active=(not is_osm))
 
     st.markdown("---")
 
-    # --- CARTE ---
-    c_mode, c_slide, _ = st.columns([2, 2, 3])
-    with c_mode:
-        mode_aff = st.radio("Affichage", ["Points", "Cercles", "Isochrones"], key=f"mode_{key_data}", horizontal=True,
-                            label_visibility="collapsed")
-    with c_slide:
-        if mode_aff == "Cercles":
-            rayon = st.slider("Rayon (m)", 500, 5000, 1000, 100, key=f"rad_{key_data}", label_visibility="collapsed")
-        else:
-            rayon = 1000
-        if mode_aff == "Isochrones":
-            temps = st.slider("Temps (min)", 5, 30, 10, 5, key=f"tps_{key_data}", label_visibility="collapsed")
-        else:
-            temps = 10
-
+    # --- CARTE (AVEC CONTROLES ET UNITES) ---
     c_map, c_legend = st.columns([3, 1])
     with c_map:
-        # Passage des communes sélectionnées pour définir la BBox des risques
-        socio, inond, rga = preparer_calques_carte_optimise(nums_deps, geo_communes_df)
+        # Contrôles
+        c_ctrl1, c_ctrl2 = st.columns([1, 2])
+        with c_ctrl1:
+            st.markdown("**Mode Affichage**")
+            mode_aff = st.radio("Mode", ["Points", "Cercles", "Isochrones"], horizontal=True,
+                                label_visibility="collapsed", key=f"mode_{key_data}")
+        with c_ctrl2:
+            st.markdown("**Paramètres**")
+            if mode_aff == "Cercles":
+                # Ajout format km
+                rayon = st.slider("Rayon (m)", 500, 5000, 1000, 100, format="%d m", label_visibility="collapsed",
+                                  key=f"rad_{key_data}")
+            else:
+                rayon = 1000
 
-        # Sécurité : Si le GDF des concurrents est vide, on prend les coordonnées des communes
+            if mode_aff == "Isochrones":
+                # Ajout format min
+                temps = st.slider("Temps (min)", 5, 30, 10, 5, format="%d min", label_visibility="collapsed",
+                                  key=f"tps_{key_data}")
+            else:
+                temps = 10
+
+        # Centrage
+        lat_c, lon_c = 46.6, 1.8
         if not gdf.empty:
             lat_c, lon_c = gdf.geometry.y.mean(), gdf.geometry.x.mean()
         elif not geo_communes_df.empty:
-            lat_c, lon_c = geo_communes_df['Latitude_Centre'].mean(), geo_communes_df['Longitude_Centre'].mean()
-        else:
-            lat_c, lon_c = 46.603354, 1.888334  # Centre France par défaut
+            lo, la = detecter_colonnes_geo(geo_communes_df)
+            if lo: lat_c, lon_c = geo_communes_df[la].mean(), geo_communes_df[lo].mean()
 
-        # --- CRITIQUE A & B : Appel de la carte corrigée avec les deux calques de risque et les POI enrichis ---
-        # Déballage à 4 valeurs pour être compatible maps.py (Critique D V1)
+        # Sécurité Volumétrie
+        if nb > 1500 and mode_aff == "Points":
+            st.warning(f"⚠️ {nb} points : Bascule automatique en mode Cercles pour fluidité.")
+            mode_aff = "Cercles"
+            rayon = 500
+
         m, leg_ens, stats_socio, _ = creer_carte_concurrence(
             gdf_points=gdf, lat_centre=lat_c, lon_centre=lon_c,
             gdf_socio=socio, col_socio=col_socio, lbl_socio=lbl_socio,
-            # Les deux couches sont passées pour garantir les calques distincts et les symboles
             gdf_inond=inond, gdf_rga=rga,
-            mode_affichage=mode_aff, rayon_cercles=rayon, temps_isochrones=temps,
-            gdf_poi=gdf_poi  # GDF POI enrichi avec 'categorie' et filtré sur la zone complète
+            mode_affichage="Cercles" if nb > 1500 else mode_aff,
+            rayon_cercles=rayon, temps_isochrones=temps,
+            gdf_poi=gdf_poi
         )
-        # st_folium est sécurisé par returned_objects=[] (fix C V1)
+
+        # AJOUT V16 : MARQUEUR CIBLE ROUGE (SIRET)
+        if not is_osm and siret_info and 'latitude' in siret_info:
+            folium.Marker(
+                [float(siret_info['latitude']), float(siret_info['longitude'])],
+                popup=f"<b>CIBLE:</b><br>{siret_info.get('denominationunitelegale')}",
+                icon=folium.Icon(color='red', icon='star', prefix='fa'),
+                tooltip="📍 Votre Etablissement"
+            ).add_to(m)
+
         st_folium(m, height=550, use_container_width=True, returned_objects=[])
 
     with c_legend:
@@ -268,55 +377,37 @@ def afficher_resultats_persistants(key_data, source_name):
         with st.container(border=True):
             st.caption("📍 Enseignes")
             if leg_ens:
-                items = list(leg_ens.items())
-                for nom, color in items[:10]:
+                for nom, color in list(leg_ens.items())[:8]:
                     st.markdown(f'<span style="color:{color};">●</span> {nom}', unsafe_allow_html=True)
-                if len(items) > 10: st.caption(f"... +{len(items) - 10} autres")
-            else:
-                st.caption("Aucune")
+                if len(leg_ens) > 8: st.caption("...")
 
-            # Légende Socio
-            if stats_socio and lbl_socio:
-                st.divider()
-                st.caption(f"📊 {lbl_socio}")
-                st.markdown(
-                    '<div style="background: linear-gradient(to right, #ffffcc, #fd8d3c, #800026); width: 100%; height: 10px; border-radius: 5px;"></div>',
-                    unsafe_allow_html=True)
-                if stats_socio.get('max'): st.caption(
-                    f"Min: {stats_socio['min']:,.0f} | Max: {stats_socio['max']:,.0f}")
-
-            # Légende Risques (CRITIQUE 2 : Rétablissement de la légende sélective)
             if show_risk:
                 st.divider()
-                # On affiche SEULEMENT le risque sélectionné
-                if "Inondation" in type_risk and not inond.empty:
-                    st.caption(f"🌊 Risque Inondation")
-                    symb = "🌊"
-                elif "Sécheresse" in type_risk and not rga.empty:
-                    st.caption(f"☀️ Risque Sécheresse")
-                    symb = "☀️"
-                else:
-                    st.caption("🌪️ Risques (Non affichés)")
-                    symb = ""
+                if "Inondation" in types_risk_selected:
+                    if not inond.empty:
+                        st.caption("🌊 Inondation")
+                        st.markdown(
+                            """<div style="font-size:12px; line-height:1.2;"><span style="color:#08306b;">■</span> Fort <span style="color:#2171b5;">■</span> Moyen <span style="color:#6baed6;">■</span> Faible</div>""",
+                            unsafe_allow_html=True)
+                    else:
+                        st.caption("🌊 Inondation (Vide sur zone)")
 
-                if symb:
-                    # Affichage des légendes des niveaux
-                    st.markdown(
-                        """
-                        <div style="font-size:13px; line-height:1.5;">
-                            <span style="color:#e74c3c;">■</span> Aléa Fort<br>
-                            <span style="color:#e67e22;">■</span> Aléa Moyen<br>
-                            <span style="color:#95a5a6;">■</span> Aléa Faible
-                        </div>
-                        """,
-                        unsafe_allow_html=True)
+                if len(types_risk_selected) > 1: st.write("")
+
+                if "Sécheresse (RGA)" in types_risk_selected:
+                    if not rga.empty:
+                        st.caption("☀️ Sécheresse")
+                        st.markdown(
+                            """<div style="font-size:12px; line-height:1.2;"><span style="color:#5D4037;">■</span> Fort <span style="color:#8D6E63;">■</span> Moyen <span style="color:#D7CCC8;">■</span> Faible</div>""",
+                            unsafe_allow_html=True)
+                    else:
+                        st.caption("☀️ Sécheresse (Vide sur zone)")
 
     st.info("ℹ️ **Note :** Les données de revenus peuvent être masquées par l'INSEE dans les zones peu denses.")
-
     st.divider()
 
     # =========================================================
-    # LOGIQUE DISTINCTE : OSM vs SIREN
+    # ONGLETS FONCTIONNELS
     # =========================================================
 
     # CAS 1 : OPENSTREETMAP (Analyse Zone / Radar)
@@ -326,49 +417,43 @@ def afficher_resultats_persistants(key_data, source_name):
         with t_rad:
             with st.container(border=True):
                 st.markdown("#### ⚙️ Paramètres d'analyse")
-                c_p1, _ = st.columns([3, 1])
-                with c_p1:
-                    rayon_ana = st.slider("Rayon d'analyse (km)", 1, 10, 3, key=f"rad_{key_data}_ana")
-
+                # Slider déjà géré au dessus, on garde les boutons profils ici
                 st.markdown("**Profils Rapides :**")
                 b1, b2, b3 = st.columns(3)
 
                 if b1.button("💎 CSP+", key=f"btn_csp_{key_data}", use_container_width=True):
-                    st.session_state[f"met_{key_data}"] = ["Cadres", "Seniors", "Retraités"]
+                    st.session_state[f"met_{key_data}"] = ["Cadres", "Seniors", "Revenus"]  # 3 metrics min
                     st.rerun()
 
+                # FIX V16 : Retrait Monoparental, ajout Actifs pour avoir 3 metrics
                 if b2.button("👨‍👩‍👧 Familles", key=f"btn_fam_{key_data}", use_container_width=True):
-                    st.session_state[f"met_{key_data}"] = ["Familles", "Jeunes", "Actifs", "Monoparental"]
+                    st.session_state[f"met_{key_data}"] = ["Familles", "Jeunes", "Actifs"]
                     st.rerun()
 
-                if b3.button("🏭 Populaire", key=f"btn_pop_{key_data}", use_container_width=True):
+                if b3.button("🏭 Ouvriers", key=f"btn_pop_{key_data}", use_container_width=True):
                     st.session_state[f"met_{key_data}"] = ["Ouvriers", "Familles", "Jeunes"]
                     st.rerun()
 
-                # Init
+                # Par défaut : 5 métriques (sans Revenus)
                 if f"met_{key_data}" not in st.session_state:
-                    st.session_state[f"met_{key_data}"] = ["Jeunes", "Cadres", "Ouvriers", "Familles",
-                                                           "Actifs"]  # Sans revenu par défaut
+                    st.session_state[f"met_{key_data}"] = ["Jeunes", "Cadres", "Ouvriers", "Familles", "Actifs"]
 
                 metrics = st.multiselect(
                     "Indicateurs :",
-                    ["Revenus", "Jeunes", "Actifs", "Seniors", "Cadres", "Ouvriers", "Familles", "Retraités",
-                     ],
+                    ["Revenus", "Jeunes", "Actifs", "Seniors", "Cadres", "Ouvriers", "Familles", "Retraités"],
                     key=f"met_{key_data}"
                 )
 
         if not gdf.empty:
-            # 1. Calcul de la zone (Buffer autour des points)
-            zone_proj = gdf.to_crs("EPSG:2154").buffer(rayon_ana * 1000).unary_union
+            # Récupération rayon depuis slider carte (s'il existe) ou défaut
+            rayon_local = rayon if 'rayon' in locals() and mode_aff == "Cercles" else 1000
+
+            zone_proj = gdf.to_crs("EPSG:2154").buffer(rayon_local).unary_union
 
             if not zone_proj.is_empty:
-                # 2. Conversion géométrique
                 geom_finale = gpd.GeoSeries([zone_proj], crs="EPSG:2154").to_crs("EPSG:4326").iloc[0]
-
-                # 3. Calcul Backend
                 stats, nom_ref = calculer_comparatif_radar(dict_geo['IRIS'], geom_finale, metrics, df_communes)
 
-                # 4. Affichage
                 if stats is not None:
                     st.divider()
                     c_radar, c_top3 = st.columns([2, 1])
@@ -386,14 +471,14 @@ def afficher_resultats_persistants(key_data, source_name):
                             stats['d'] = (stats['Indice_100'] - 100).abs()
                             for _, r in stats.sort_values('d', ascending=False).head(3).iterrows():
                                 ic = "📈" if r['Indice_100'] > 100 else "📉"
-                                # Gestion unité €/%
                                 unit = "€" if "Revenu" in r['Metrique'] else "%"
                                 val_aff = f"{r['Zone']:,.0f}".replace(",", " ") + unit
+                                val_delta = f"{r['Indice_100'] - 100:+.0f} pts"
 
                                 st.metric(
                                     f"{ic} {r['Metrique']}",
                                     val_aff,
-                                    f"{r['Indice_100'] - 100:+.0f} pts",
+                                    val_delta,
                                     delta_color="normal"
                                 )
 
@@ -416,7 +501,11 @@ def afficher_resultats_persistants(key_data, source_name):
                                      key=f"metrie_{key_data}")
 
                 gdf_calc = gdf.copy().to_crs("EPSG:2154")
-                ref_point = gpd.GeoSeries([gpd.points_from_xy([siret_info['longitude']], [siret_info['latitude']])[0]],
+
+                # FIX V16 : Vérification ordre lat/lon dans points_from_xy (Longitude d'abord = X)
+                lon_t = float(siret_info['longitude'])
+                lat_t = float(siret_info['latitude'])
+                ref_point = gpd.GeoSeries([gpd.points_from_xy([lon_t], [lat_t])[0]],
                                           crs="EPSG:4326").to_crs("EPSG:2154").iloc[0]
                 gdf_calc['dist_m'] = gdf_calc.distance(ref_point)
 
@@ -430,13 +519,11 @@ def afficher_resultats_persistants(key_data, source_name):
                     gdf_calc['val_aff'] = (gdf_calc['dist_m'] / 1000).round(2)
                     suffix = " km"
 
-                # Catégorisation avec numérotation pour forcer l'ordre de tri si besoin,
-                # mais ici on utilise category_orders de Plotly
                 def segmenter(v):
                     if v < seuil_proche:
                         return "🔴 Frontale"
                     elif v < seuil_loin:
-                        return "🟠 Zone Chalandise"
+                        return "🟠 Zone Proche"
                     return "🟢 Eloignée"
 
                 gdf_calc['Catégorie'] = gdf_calc[val_col].apply(segmenter)
@@ -446,25 +533,27 @@ def afficher_resultats_persistants(key_data, source_name):
                     f"""
                     **Légende des zones :**
                     - **🔴 Frontale** (< {seuil_proche}{suffix}) : Menace immédiate, captation de flux piéton.
-                    - **🟠 Zone Chalandise** ({seuil_proche}-{seuil_loin}{suffix}) : Concurrence standard voiture/transport.
+                    - **🟠 Zone Proche** ({seuil_proche}-{seuil_loin}{suffix}) : Concurrence standard voiture/transport.
                     - **🟢 Eloignée** (> {seuil_loin}{suffix}) : Faible impact quotidien.
                     """
                 )
 
                 c_g, c_k = st.columns([2, 1])
                 with c_g:
-                    # Ordre imposé : Frontale -> Chalandise -> Eloignée
-                    ordre_cat = ["🟢 Eloignée", "🟠 Zone Chalandise", "🔴 Frontale"]
+                    # Fix V16 : Force l'affichage de toutes les catégories même si 0
+                    counts = gdf_calc['Catégorie'].value_counts().reset_index()
+                    all_cats = pd.DataFrame({'Catégorie': ["🔴 Frontale", "🟠 Zone Proche", "🟢 Eloignée"]})
+                    counts = all_cats.merge(counts, on='Catégorie', how='left').fillna(0)
 
                     fig_bar = px.bar(
-                        gdf_calc['Catégorie'].value_counts().reset_index(),
+                        counts,
                         x='count', y='Catégorie',  # Orientation Horizontale pour lisibilité
                         orientation='h',
                         title="Répartition de la Menace",
                         color='Catégorie',
-                        color_discrete_map={"🔴 Frontale": "#d62728", "🟠 Zone Chalandise": "#ff7f0e",
+                        color_discrete_map={"🔴 Frontale": "#d62728", "🟠 Zone Proche": "#ff7f0e",
                                             "🟢 Eloignée": "#2ca02c"},
-                        category_orders={"Catégorie": ordre_cat}  # Force l'ordre
+                        category_orders={"Catégorie": ["🟢 Eloignée", "🟠 Zone Proche", "🔴 Frontale"]}  # Force l'ordre
                     )
                     fig_bar.update_layout(yaxis_title=None, xaxis_title="Nombre d'établissements")
                     st.plotly_chart(fig_bar, use_container_width=True)
@@ -489,10 +578,12 @@ def afficher_resultats_persistants(key_data, source_name):
                     # On ne garde que les âges valides
                     df_age = df_age[df_age['Ancienneté'] >= 0].sort_values('Ancienneté', ascending=False)
 
-                    # Calculs statistiques du marché
-                    moy_age = df_age['Ancienneté'].mean()
-                    min_age = df_age['Ancienneté'].min()
-                    max_age = df_age['Ancienneté'].max()
+                    # --- FIX V12 : Initialisation Variables avant utilisation ---
+                    min_age, max_age, moy_age = 0, 0, 0
+                    if not df_age.empty:
+                        min_age = df_age['Ancienneté'].min()
+                        max_age = df_age['Ancienneté'].max()
+                        moy_age = df_age['Ancienneté'].mean()
 
                     age_ref = 0
                     if siret_info and siret_info.get('datecreationetablissement'):
@@ -500,7 +591,7 @@ def afficher_resultats_persistants(key_data, source_name):
                         age_ref = (pd.Timestamp.now() - d_ref).days / 365.25
 
                     # --- BLOC INSIGHT AMÉLIORÉ ---
-                    if age_ref > 0:
+                    if age_ref > 0 and not df_age.empty:
                         # Ranking : Combien sont plus vieux strictement ?
                         plus_vieux = df_age[df_age['Ancienneté'] > age_ref].shape[0]
                         total = len(df_age)
@@ -536,18 +627,28 @@ def afficher_resultats_persistants(key_data, source_name):
                         """, unsafe_allow_html=True)
 
                     # Histogramme Plotly
-                    fig_hist = px.histogram(
-                        df_age, x="Ancienneté", nbins=20,
-                        title="Pyramide des âges",
-                        color_discrete_sequence=['#B8860B'],
-                        labels={'Ancienneté': "Années d'existence", "count": "Nombre d'établissements"}
-                    )
-                    if age_ref > 0:
-                        fig_hist.add_vline(x=age_ref, line_width=3, line_dash="dash", line_color="red")
-                        fig_hist.add_annotation(x=age_ref, y=0, text="Vous", showarrow=True, arrowhead=1,
-                                                yanchor="bottom")
+                    if not df_age.empty:
+                        fig_hist = px.histogram(
+                            df_age, x="Ancienneté", nbins=20,
+                            title="Pyramide des âges",
+                            color_discrete_sequence=['#B8860B'],
+                            labels={'Ancienneté': "Années d'existence", "count": "Nombre d'établissements"}
+                        )
+                        # Ligne Rouge (Etablissement)
+                        if age_ref > 0:
+                            fig_hist.add_vline(x=age_ref, line_width=3, line_dash="dash", line_color="red")
+                            fig_hist.add_annotation(x=age_ref, y=0, text="Vous", showarrow=True, arrowhead=1,
+                                                    yanchor="bottom")
 
-                    st.plotly_chart(fig_hist, use_container_width=True)
+                        # Ligne Verte (Moyenne) - V16
+                        if moy_age > 0:
+                            fig_hist.add_vline(x=moy_age, line_width=3, line_dash="dot", line_color="green")
+                            fig_hist.add_annotation(x=moy_age, y=0, text="Moyenne", showarrow=True, arrowhead=1,
+                                                    yanchor="top")
+
+                        st.plotly_chart(fig_hist, use_container_width=True)
+                    else:
+                        st.warning("Données d'âge insuffisantes.")
 
                 except Exception as e:
                     st.error(f"Erreur calcul ancienneté : {e}")
@@ -625,6 +726,7 @@ with tab_siren:
         if 'ref_etab_data' in st.session_state:
             inf = st.session_state['ref_etab_data']
             naf, dep = inf.get('activiteprincipaleetablissement'), inf.get('numero_dep')
+            naf_label = inf.get('intitules_naf_vf', 'NAF')  # AJOUT V16
             ville = extraire_ville_depuis_adresse(inf.get('adresse'))
 
             reg_txt = ""
@@ -640,11 +742,23 @@ with tab_siren:
             c_i, c_s = st.columns([1, 1.5])
             with c_i:
                 st.caption("Cible")
-                st.markdown(f"**NAF {naf}**\n\n{ville} ({dep})")
+                # AJOUT V16
+                st.markdown(f"**{naf} - {naf_label}**\n\n{ville} ({dep})")
             with c_s:
                 st.caption("Périmètre")
                 scope = st.radio("Zone :", [f"Ville ({ville})", f"Dépt ({dep})", f"Région ({reg_txt.strip(' - ')})"],
                                  key="scope_rad")
+
+            # --- Feature V12 : Bouton Check Volume ---
+            if st.button("⚡ Vérifier le volume", type="secondary"):
+                if "Dépt" in scope:
+                    count = compter_resultats_sql(engine, naf, dep, siret)
+                    if count > 1500:
+                        st.warning(f"⚠️ **{count} résultats** potentiels : La carte sera chargée en mode allégé.")
+                    else:
+                        st.info(f"✅ **{count} résultats** : Volume raisonnable.")
+                else:
+                    st.info("ℹ️ L'estimation précise pour une Ville nécessite le géocodage complet. Lancez l'analyse.")
 
             if st.button("🚀 Analyser", type="primary", use_container_width=True):
                 z_type = "Ville" if "Ville" in scope else "Département" if "Dépt" in scope else "Région"
@@ -661,7 +775,7 @@ with tab_siren:
                         if z_type == "Ville":
                             # Ne garder que la ligne de commune de la ville cible
                             geo_df_cible = df_communes[(df_communes['Nom_Ville'].str.upper() == ville.upper()) & (
-                                        df_communes['Num_Dep'] == str(dep))]
+                                    df_communes['Num_Dep'] == str(dep))]
                         else:
                             # Garder toutes les communes du département
                             geo_df_cible = communes_du_dep

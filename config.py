@@ -64,3 +64,39 @@ POI_CONFIG = {
         "icon": {'icon': 'shopping-cart', 'color': 'purple', 'prefix': 'fa'}
     }
 }
+
+# =================================================================
+# 3. CONFIGURATION LOCOMOTIVES (SCORING FLUX)
+# =================================================================
+LOCOMOTIVES_CONFIG = {
+    "Gares & Transports": {
+        "tags": {"railway": "station", "aeroway": "terminal"},
+        "poids": 10,
+        "description": "Gares, Métros"
+    },
+    "Écoles / Lycées": {
+        "tags": {"amenity": ["college", "university", "school"]},
+        "poids": 8,
+        "description": "Enseignement"
+    },
+    "Supermarchés / Mall": {
+        "tags": {"shop": ["supermarket", "mall", "department_store"]},
+        "poids": 7,
+        "description": "GMS, Mall"
+    },
+    "Santé (Hôpital)": {
+        "tags": {"amenity": "hospital"},
+        "poids": 6,
+        "description": "Hôpitaux"
+    },
+    "Fast Food": {
+        "tags": {"amenity": "fast_food", "cuisine": "burger"},
+        "poids": 4,
+        "description": "Resto Rapide"
+    },
+    "Services Publics": {
+        "tags": {"amenity": ["townhall", "post_office"]},
+        "poids": 3,
+        "description": "Mairie, Poste"
+    }
+}

@@ -3,6 +3,7 @@ import pandas as pd
 import geopandas as gpd
 import streamlit as st
 from config import PATHS
+import os
 
 
 # =============================================================================
@@ -11,17 +12,43 @@ from config import PATHS
 
 @st.cache_data(show_spinner=False)
 def charger_communes() -> pd.DataFrame:
-    """Charge le référentiel des communes (Excel)."""
+    """
+    Charge le référentiel des communes (Excel).
+    Normalise les noms de colonnes pour garantir latitude/longitude standards.
+    """
     path = PATHS["COMMUNES"]
     try:
         df = pd.read_excel(path)
+
+        # --- NORMALISATION CRITIQUE DES COLONNES ---
+        # On mappe les variations possibles vers les standards du projet
+        rename_map = {
+            'Longitude_Centre': 'longitude',
+            'Latitude_Centre': 'latitude',
+            'gps_lng': 'longitude',
+            'gps_lat': 'latitude',
+            'lon': 'longitude',
+            'lat': 'latitude'
+        }
+        df = df.rename(columns=rename_map)
+
+        # Standardisation du Code Département (toujours string, ex: '01' et non 1)
         if 'Num_Dep' in df.columns:
-            df['Num_Dep'] = df['Num_Dep'].astype(str)
+            # On s'assure que c'est propre (suppression .0 si float, zfill)
+            df['Num_Dep'] = df['Num_Dep'].astype(str).str.split('.').str[0].str.zfill(2)
+
+        # Vérification silencieuse pour le développeur (log console)
+        if 'latitude' not in df.columns or 'longitude' not in df.columns:
+            print(f"⚠️ ATTENTION LOADERS: Colonnes géo standards introuvables dans {path}. Colonnes présentes: {df.columns.tolist()}")
+
         return df
+
     except FileNotFoundError:
         st.error(f"Fichier introuvable : {path}")
         return pd.DataFrame()
-
+    except Exception as e:
+        st.error(f"Erreur critique lors du chargement des communes : {e}")
+        return pd.DataFrame()
 
 @st.cache_data(show_spinner=False)
 def charger_centres_departements() -> pd.DataFrame:

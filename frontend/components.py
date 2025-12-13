@@ -128,51 +128,51 @@ def sidebar_filtres_batiments():
 def sidebar_filtres_risques(df_communes, nom_risque=None, gdf_risque=None):
     """
     Fonction unique de filtrage Geo/Risque.
-    NOTE : Utilise les symboles en dur pour cette itération de correction critique.
+    Amélioration V2 : Multiselect pour le choix des risques et Expander pour la zone géo.
     """
-
     is_page_02_context = (nom_risque is not None and gdf_risque is not None)
 
     if is_page_02_context:
-        # --- CAS 1 : CONTEXTE PAGE 02 ---
-
-        # 🚨 CORRECTION CRITIQUE : Utilisation des symboles en dur
+        # --- CAS 1 : CONTEXTE PAGE 02 (IMPLANTATION) ---
         emoji = "🌊" if "Inondation" in nom_risque else "☀️" if "Sécheresse" in nom_risque else "🌪️"
         titre = f"#### {emoji} {nom_risque}"
 
         st.markdown(titre)
-
         show = st.checkbox(f"Afficher {nom_risque}", value=False, key=f"show_risk_{nom_risque}")
 
-        regions_filtrees, departements_labels, _ = [], [], []
+        regions_filtrees, departements_labels = [], []
 
         if show:
-            st.caption("Filtre géographique (Optionnel):")
-            regions_filtrees, departements_labels, _ = _filtre_geo_base(df_communes, nom_risque)
+            # On range le filtre géographique dans un expander pour ne pas polluer
+            with st.expander(f"📍 Filtrer la zone ({nom_risque})", expanded=False):
+                regions_filtrees, departements_labels, _ = _filtre_geo_base(df_communes, nom_risque)
 
         return show, regions_filtrees, departements_labels
 
     else:
-        # --- CAS 2 : CONTEXTE PAGE 01 ---
-        st.markdown("### 🌪️ Filtres Géographiques")
+        # --- CAS 2 : CONTEXTE PAGE 01 (CONCURRENCE) ---
+        st.markdown("### 🌪️ Calques Risques")
 
-        show = st.checkbox("Activer les filtres de zone", value=False, key="show_risk_general")
+        show = st.checkbox("Activer les Risques", value=False, key="show_risk_general")
 
         regions_filtrees, departements_codes = [], []
-        type_de_risque_a_filtrer = "Inondation"
+        types_selectionnes = []
 
         if show:
-            # Sélecteur de risque
-            type_de_risque_a_filtrer = st.selectbox(
-                "Type de risque ciblé (Radar) :",
-                ["Inondation", "Sécheresse (RGA)"],  # Symboles absents de la liste pour ne pas dépendre de la constante
+            # 1. Le Multiselect permet de choisir vraiment ce qu'on veut voir
+            types_selectionnes = st.multiselect(
+                "Types de risques :",
+                options=["Inondation", "Sécheresse (RGA)"],
+                default=["Inondation", "Sécheresse (RGA)"], # Par défaut les deux
                 key="type_risk_p01_select"
             )
 
-            st.caption("Restreindre la zone par Région / Département :")
-            regions_filtrees, _, departements_codes = _filtre_geo_base(df_communes, "general")
+            # 2. Zone géographique rangée dans un expander propre
+            with st.expander("🌍 Restreindre la zone (Optionnel)", expanded=False):
+                st.caption("Filtrer les risques par région/département :")
+                regions_filtrees, _, departements_codes = _filtre_geo_base(df_communes, "general")
 
-        return show, type_de_risque_a_filtrer, regions_filtrees, departements_codes
+        return show, types_selectionnes, regions_filtrees, departements_codes
 
 
 def sidebar_filtres_reseau():

@@ -20,8 +20,8 @@ def get_etablissement_par_siret(engine, siret):
     query = text("""
         SELECT 
             siret, siren, denominationunitelegale, 
-            activiteprincipaleetablissement, adresse,
-            numero_dep, nom_dep, latitude, longitude,
+            activiteprincipaleetablissement, intitules_naf_vf,
+            adresse, numero_dep, nom_dep, latitude, longitude,
             datecreationetablissement, etablissementsiege
         FROM etablissements
         WHERE siret = :siret
@@ -35,6 +35,8 @@ def get_etablissement_par_siret(engine, siret):
                 return dict(result._mapping)
     except Exception as e:
         print(f"Erreur SQL SIRET: {e}")
+        # On ne bloque pas si la colonne n'existe pas encore en base
+        st.warning("Info: Impossible de récupérer le libellé NAF (Colonne manquante ?).")
     return None
 
 
@@ -42,25 +44,20 @@ def get_etablissement_par_siret(engine, siret):
 # 2. LISTE ÉTABLISSEMENTS D'UNE ENTREPRISE (SIREN - 9 chiffres)
 # =============================================================================
 def get_etablissements_par_siren(engine, siren):
-    """
-    Récupère TOUS les établissements liés à un SIREN (9 chiffres).
-    Retourne un DataFrame.
-    """
     if not engine: return pd.DataFrame()
 
     siren = str(siren).strip().replace(" ", "")
-    # Sécurité format
     if len(siren) != 9: return pd.DataFrame()
 
     query = text("""
         SELECT 
             siret, siren, denominationunitelegale, 
-            activiteprincipaleetablissement, adresse,
-            numero_dep, nom_dep, latitude, longitude,
+            activiteprincipaleetablissement, intitules_naf_vf,
+            adresse, numero_dep, nom_dep, latitude, longitude,
             datecreationetablissement, etablissementsiege
         FROM etablissements
         WHERE siren = :siren
-        ORDER BY etablissementsiege DESC; -- Siège en premier
+        ORDER BY etablissementsiege DESC;
     """)
 
     try:
@@ -81,14 +78,14 @@ def get_concurrents_sql(engine, code_naf, num_dep, siret_exclu="0"):
     """
     if not engine: return pd.DataFrame()
 
-    # On nettoie le SIREN à exclure (les 9 premiers chiffres du SIRET)
     siren_exclu = str(siret_exclu)[:9]
 
     query = text("""
         SELECT 
             siret, siren, denominationunitelegale, adresse,
-            latitude, longitude, activiteprincipaleetablissement,
-            datecreationetablissement
+            latitude, longitude, activiteprincipaleetablissement, intitules_naf_vf,
+            datecreationetablissement,
+            adresse as adresse_simplifiee 
         FROM etablissements
         WHERE 
             activiteprincipaleetablissement = :code_naf AND
@@ -113,19 +110,11 @@ def get_concurrents_sql(engine, code_naf, num_dep, siret_exclu="0"):
 # 4. STATISTIQUES ANCIENNETÉ
 # =============================================================================
 def calculer_stats_anciennete(engine, code_naf, scope, code_dep, ville_nom=None):
-    """
-    Calcule l'âge moyen des concurrents dans la zone.
-    CRITIQUE : code_dep accepte désormais une liste de départements (pour la portée Région/France).
-    """
     if not engine: return None
 
-    # Conversion en liste/tuple pour la clause IN de SQL
-    if isinstance(code_dep, str):
-        code_dep = [code_dep]
-
+    if isinstance(code_dep, str): code_dep = [code_dep]
     if not code_dep: return None
 
-    # 1. Requête SQL : On tire large (Département(s))
     query = text(f"""
         SELECT datecreationetablissement, adresse
         FROM etablissements
@@ -134,20 +123,15 @@ def calculer_stats_anciennete(engine, code_naf, scope, code_dep, ville_nom=None)
 
     try:
         with engine.connect() as conn:
-            # SQLAlchemy utilise un dictionnaire pour les paramètres IN (tuple)
             df = pd.read_sql(query, conn, params={"code_naf": code_naf, "num_dep": tuple(code_dep)})
 
         if df.empty: return None
 
-        # 2. Filtrage Ville (Python) si nécessaire
         if scope == "Ville" and ville_nom:
-            # L'import de extraire_ville_depuis_adresse est requis et doit être géré dans ce fichier
             df['ville_extract'] = df['adresse'].apply(extraire_ville_depuis_adresse)
             df = df[df['ville_extract'] == ville_nom.upper()]
-
             if df.empty: return None
 
-        # 3. Calculs Mathématiques
         df['date_creation'] = pd.to_datetime(df['datecreationetablissement'], errors='coerce')
         df = df.dropna(subset=['date_creation'])
 
