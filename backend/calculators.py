@@ -429,6 +429,32 @@ def estimer_empreinte_carbone(df, col_naf=None):
     return df
 
 
+def recuperer_climat_plus_proche(lat_cible, lon_cible, df_climat):
+    """
+    Trouve le point de grille le plus proche (Nearest Neighbor)
+    pour éviter le bug du "+0 jours".
+    """
+    if df_climat is None or df_climat.empty:
+        return {}
+
+    # 1. Calcul vectoriel de la distance au carré (plus rapide que la racine carrée)
+    # On suppose lat/lon en degrés, approximation euclidienne suffisante pour ce maillage fin
+    dist_sq = (df_climat['lat_round'] - lat_cible) ** 2 + (df_climat['lon_round'] - lon_cible) ** 2
+
+    # 2. Trouver l'index du minimum
+    idx_min = dist_sq.idxmin()
+
+    # 3. Récupérer la ligne correspondante
+    closest_row = df_climat.loc[idx_min]
+
+    # Debug optionnel : vérifie si on n'est pas trop loin (> 0.1 degré ~= 10km)
+    min_dist = np.sqrt(dist_sq.min())
+    if min_dist > 0.1:
+        # Si la station la plus proche est à >10km, attention (zone non couverte ?)
+        pass
+
+    return closest_row.to_dict()
+
 # =============================================================================
 # 4. ENRICHISSEMENT MASSIF (Le "Service" Hybride)
 # =============================================================================

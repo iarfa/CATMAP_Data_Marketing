@@ -240,20 +240,29 @@ def _ajouter_couche_risques_rga(m, gdf):
 # =================================================================
 # CRÉATION CARTE IMPLANTATION (PAGE 02) (Modifiée pour les Risques)
 # =================================================================
+
+# Fichier: frontend/maps.py
+
 def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_trouves,
                              gdf_socio=None, colonne_socio=None, nom_indicateur_socio=None,
                              gdf_batiments=None, gdf_inondations=None, gdf_rga=None,
                              nom_point_central="Cible", adresse_point_central="", analysis_mode='Isochrones',
                              df_dvf=None, dvf_type_filtre="Tous", mode_affichage_dvf="Points",
                              gdf_reseau_cannibale=None):
+    """
+    Génère la carte d'analyse d'implantation (Page 02).
+    Retourne : (objet_carte_folium, objet_legende_socio)
+    """
     # 1. MAP INIT
     m = folium.Map(location=[lat_centre, lon_centre], zoom_start=14, tiles="OpenStreetMap")
 
-    # 2. ZONE D'ANALYSE (SÉCURITÉ: Vérifie la géométrie)
+    # 2. ZONE D'ANALYSE
     if zone_analyse_geom and zone_analyse_geom.geom_type in ['Polygon', 'MultiPolygon']:
-        folium.GeoJson(zone_analyse_geom,
-                       style_function=lambda x: {'fillColor': '#A67C00', 'color': '#A67C00', 'weight': 2,
-                                                 'fillOpacity': 0.1}, name="Zone d'étude").add_to(m)
+        folium.GeoJson(
+            zone_analyse_geom,
+            style_function=lambda x: {'fillColor': '#A67C00', 'color': '#A67C00', 'weight': 2, 'fillOpacity': 0.1},
+            name="Zone d'étude"
+        ).add_to(m)
 
     # 3. DVF (Immobilier)
     if df_dvf is not None and not df_dvf.empty:
@@ -263,27 +272,34 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
             _ajouter_couche_dvf_points(m, df_dvf, dvf_type_filtre)
 
     # 4. COUCHES CONTEXTUELLES (Socio & Risques)
-    _ajouter_couche_socio(m, gdf_socio, colonne_socio, nom_indicateur_socio)
+    # MODIFICATION : On récupère la légende (cmap) mais on NE l'ajoute PAS à la carte (add_to supprimé)
+    # Elle sera retournée pour affichage externe.
+    cmap, single_val = _ajouter_couche_socio(m, gdf_socio, colonne_socio, nom_indicateur_socio)
 
-    # --- CORRECTION A : Utilisation des fonctions séparées ---
     _ajouter_couche_risques_inondation(m, gdf_inondations)
     _ajouter_couche_risques_rga(m, gdf_rga)
 
     # 5. POINT CENTRAL
-    folium.Marker([lat_centre, lon_centre], icon=folium.Icon(color='red', icon='crosshairs', prefix='fa'),
-                  tooltip=nom_point_central, popup=adresse_point_central, z_index_offset=1000).add_to(m)
+    folium.Marker(
+        [lat_centre, lon_centre],
+        icon=folium.Icon(color='red', icon='crosshairs', prefix='fa'),
+        tooltip=nom_point_central,
+        popup=adresse_point_central,
+        z_index_offset=1000
+    ).add_to(m)
 
-    # 6. POI (Rendu POI restauré et corrigé pour utiliser POI_CONFIG via 'categorie')
+    # 6. POI
     if gdf_poi_trouves is not None and not gdf_poi_trouves.empty:
         fg_poi = folium.FeatureGroup(name="POI Zone", show=True)
         for _, r in gdf_poi_trouves.iterrows():
-            # La colonne 'categorie' DOIT être enrichie en amont (dans P02)
             cat = r.get('categorie', 'Divers')
             icon_config = POI_CONFIG.get(cat, {}).get('icon', {'icon': 'map-marker', 'color': 'gray', 'prefix': 'fa'})
 
-            folium.Marker([r.geometry.y, r.geometry.x],
-                          icon=folium.Icon(**icon_config),
-                          tooltip=f"{cat}: {r.get('name', '')}").add_to(fg_poi)
+            folium.Marker(
+                [r.geometry.y, r.geometry.x],
+                icon=folium.Icon(**icon_config),
+                tooltip=f"{cat}: {r.get('name', '')}"
+            ).add_to(fg_poi)
         fg_poi.add_to(m)
 
     # 7. BÂTIMENTS (Audit Risque)
@@ -292,30 +308,36 @@ def creer_carte_implantation(lat_centre, lon_centre, zone_analyse_geom, gdf_poi_
 
         def style_bat(f):
             props = f['properties']
-            col = '#3498db'
-            if props.get('niveau_Inondation') == 'Aléa fort':
-                col = '#e74c3c'
-            elif props.get('niveau_Argile') == 'Aléa fort':
-                col = '#e67e22'
+            col = '#3498db' # Bleu par défaut
+            if 'ort' in str(props.get('niveau_Inondation', '')): col = '#e74c3c' # Rouge
+            elif 'ort' in str(props.get('niveau_Argile', '')): col = '#e67e22' # Orange
             return {'fillColor': col, 'color': col, 'weight': 1, 'fillOpacity': 0.6}
 
-        folium.GeoJson(gdf_batiments.to_json(), style_function=style_bat,
-                       tooltip=folium.features.GeoJsonTooltip(fields=['surface_m2'], aliases=['Surface:'])).add_to(
-            fg_bat)
+        # On convertit en GeoJson avec Tooltip (Survol) et Popup (Clic)
+        folium.GeoJson(
+            gdf_batiments.to_json(),
+            style_function=style_bat,
+            tooltip=folium.features.GeoJsonTooltip(
+                fields=['surface_m2', 'niveau_Inondation', 'niveau_Argile'],
+                aliases=['Surface (m²):', 'Inondation:', 'Sécheresse:'],
+                localize=True
+            ),
+            popup=folium.GeoJsonPopup(fields=['surface_m2'], aliases=['Surface (m²)'])
+        ).add_to(fg_bat)
         fg_bat.add_to(m)
 
-    # 8. CANNIBALISATION (Visu Chevauchement)
+    # 8. CANNIBALISATION
     if gdf_reseau_cannibale is not None and not gdf_reseau_cannibale.empty:
         folium.GeoJson(
             gdf_reseau_cannibale.to_json(),
             style_function=lambda x: {'fillColor': 'red', 'color': 'red', 'weight': 2, 'fillOpacity': 0.3},
-            name="Zone de Cannibalisation (Overlap)"
+            name="Zone de Cannibalisation"
         ).add_to(m)
 
     Fullscreen().add_to(m)
     folium.LayerControl().add_to(m)
-    # L'objectif de P02 est la carte et les KPI, pas la légende socio/dvf
-    return m
+
+    return m, cmap
 
 
 # =================================================================
