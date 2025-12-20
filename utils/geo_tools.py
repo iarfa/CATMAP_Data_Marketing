@@ -159,37 +159,58 @@ def get_stats_sinistralite(df_catnat):
 
     return nb_total, nb_recent, top_peril
 
+
 @st.cache_data
 def projeter_climat_2050(target_lat, target_lon):
     """
-    Trouve le point météo le plus proche via un calcul de distance simple.
-    CRITIQUE : Utilise maintenant charger_moteur_climat() du backend.
+    Trouve le point météo le plus proche via un calcul de distance vectoriel.
+    Version Corrigée V2 : Force le typage numérique et élargit la recherche.
     """
-    # 1. Chargement de la source de données via le backend
+    # 1. Chargement
     df_clim = charger_moteur_climat()
 
-    # Définition des données de secours (0)
+    # Définition des données par défaut (Vides)
     zero_data = {"Jours Canicule": 0, "Nuits Tropicales": 0, "Sécheresse Sol": 0, "Pluie Extrême": 0}
-    if df_clim.empty:
+
+    if df_clim is None or df_clim.empty:
         return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
 
-    # 2. Calcul de distance (Pythagore simple)
-    # Les colonnes sont nommées 'lat_round' et 'lon_round' dans le fichier parquet
-    if 'lat_round' not in df_clim.columns or 'lon_round' not in df_clim.columns:
-         return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
+    # 2. Nettoyage & Sécurisation des types (CRITIQUE POUR LE BUG +0)
+    try:
+        # On s'assure que les coordonnées sont bien des nombres (et pas des strings "43.5")
+        df_clim['lat_round'] = pd.to_numeric(df_clim['lat_round'], errors='coerce')
+        df_clim['lon_round'] = pd.to_numeric(df_clim['lon_round'], errors='coerce')
 
-    distances = (df_clim['lat_round'] - target_lat) ** 2 + (df_clim['lon_round'] - target_lon) ** 2
+        # On vire les lignes illisibles
+        df_clim = df_clim.dropna(subset=['lat_round', 'lon_round'])
+
+        if df_clim.empty:
+            return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
+
+    except KeyError:
+        # Si les colonnes n'existent pas du tout
+        return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
+
+    # 3. Calcul de distance (Nearest Neighbor)
+    # Distance euclidienne au carré (suffisant et rapide)
+    # target_lat/lon doivent aussi être des floats
+    t_lat = float(target_lat)
+    t_lon = float(target_lon)
+
+    distances = (df_clim['lat_round'] - t_lat) ** 2 + (df_clim['lon_round'] - t_lon) ** 2
+
+    # 4. Identification du gagnant
     idx_min = distances.idxmin()
-    min_dist = distances.min()
+    min_dist_sq = distances.min()
 
-    # 3. Sécurité : Si le point le plus proche est trop loin
-    if min_dist > 0.05:
+    # Seuil de sécurité : 0.25 degré² ~= 0.5 degré linéaire ~= 55 km
+    # On accepte d'aller chercher un peu loin si nécessaire
+    if min_dist_sq > 0.25:
         return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
 
-    # 4. On récupère la ligne gagnante
+    # 5. Extraction des données
     row = df_clim.loc[idx_min]
 
-    # 5. Construction du résultat
     return {
         "RCP 4.5": {
             "Jours Canicule": int(row.get("RCP45_Jours Canicule", 0)),

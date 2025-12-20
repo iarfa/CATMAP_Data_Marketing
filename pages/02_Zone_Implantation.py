@@ -37,7 +37,7 @@ from utils.geo_tools import (
     analyser_environnement_naturel, projeter_climat_2050, extraire_ville_depuis_adresse,
     transfo_geodataframe
 )
-from config import POI_CONFIG
+from config import POI_CONFIG, LOCOMOTIVES_CONFIG, PATHS
 
 # --- CONFIG ---
 st.title("📍 Diagnostic Territorial & Risques")
@@ -72,25 +72,50 @@ if 'dvf_local_filter' not in st.session_state: st.session_state.dvf_local_filter
 
 # --- SIDEBAR (MISE EN FORME UX CORRIGÉE) ---
 with st.sidebar:
-    st.header("🎛️ Calques & Filtres")
+    st.header("🎛️ Paramètres de la Carte")
 
+    # --- AJOUT DIAGNOSTIC ---
+    debug_climat = st.toggle("🛠️ Debug Climat", value=False)
+    if debug_climat:
+        st.error("🕵️‍♂️ ANALYSE FICHIER CLIMAT")
+        try:
+            # Lecture directe sans cache pour voir le vrai fichier
+            df_clim_debug = pd.read_parquet(PATHS["CLIMAT_2050"])
+            st.write(f"Lignes : {len(df_clim_debug)}")
+            st.write("Colonnes détectées :")
+            st.write(df_clim_debug.columns.tolist())
+            st.write("Aperçu (5 premières lignes) :")
+            st.dataframe(df_clim_debug.head(1000))
+        except Exception as e:
+            st.error(f"Impossible de lire le fichier : {e}")
+    # ------------------------
+
+    # BLOC 1 : Socio, POI et Risques (Regroupés dans un conteneur comme P01)
     with st.container(border=True):
-        st.markdown("#### 1. 👥 Socio-Démo & POI")
+        # 1. Socio
         gdf_socio_full, col_socio, lbl_socio, maille = sidebar_filtres_socio(dict_geo)
         st.divider()
+
+        # 2. POI
         pois_selected = sidebar_filtres_poi()
+        st.divider()
+
+        # 3. Audit & Risques (Spécifique P02 mais intégré au style P01)
+        st.markdown("### 🏗️ Audit & Risques")
+
+        # Filtre Bâtiments
+        show_batiments, surf_min, surf_max = sidebar_filtres_batiments()
+
+        # Filtres Risques (Appels spécifiques P02 conservés pour la granularité)
+        show_inond, reg_inond, dep_inond = sidebar_filtres_risques(df_communes, "Inondation", gdf_inond_full)
+        show_rga, reg_rga, dep_rga = sidebar_filtres_risques(df_communes, "Sécheresse (RGA)", gdf_rga_full)
 
     st.divider()
 
-    st.markdown("### 🏗️ Audit Technique & Risques")
-    show_batiments, surf_min, surf_max = sidebar_filtres_batiments()
-
-    # Correction A (V2): On passe des noms de risques pour les clés
-    show_inond, reg_inond, dep_inond = sidebar_filtres_risques(df_communes, "Inondation", gdf_inond_full)
-    show_rga, reg_rga, dep_rga = sidebar_filtres_risques(df_communes, "Sécheresse (RGA)", gdf_rga_full)
-
-    st.divider()
-    mode_cannibale, gdf_reseau_client, nom_enseigne_reseau, rayon_search = sidebar_filtres_reseau()
+    # BLOC 2 : Cannibalisation (Conteneur séparé pour bien distinguer)
+    with st.container(border=True):
+        st.markdown("### 📉 Analyse Réseau")
+        mode_cannibale, gdf_reseau_client, nom_enseigne_reseau, rayon_search = sidebar_filtres_reseau()
 
 # --- INPUT CENTRAL ---
 target = selection_point_central(engine)
@@ -110,7 +135,16 @@ is_polygonal = False
 naf_ref = None
 dep_ref_code = None
 age_stats = None
+
+# --- VARIABLES AJOUTÉES POUR ÉVITER LE CRASH ---
 score_final = 0
+statut_zone = "En attente"  # Initialisation par défaut
+couleur_statut = "gray"     # Initialisation par défaut
+parts = {}                  # Pour éviter crash sur parts.get()
+malus_c = 0                 # Pour éviter crash sur malus_c
+malus_i = 0
+malus_r = 0
+ex = {}                     # Pour éviter crash sur ex.get()
 
 if target and target.get("valeur"):
 
@@ -134,7 +168,7 @@ if target and target.get("valeur"):
             try:
                 if mode == 'Isochrones':
                     # Temps par défaut à 10 minutes (600s)
-                    geo_iso = calculer_isochrone_api(final_lon, final_lat, 600)
+                    geo_iso = calculer_isochrone_api(final_lon, final_lat,radius)
                     geom_zone = shape(geo_iso['geometry']) if geo_iso else None
                 elif mode == "Cercle d'influence":
                     p = gpd.GeoDataFrame(geometry=[Point(final_lon, final_lat)], crs="EPSG:4326")
@@ -170,32 +204,115 @@ if target and target.get("valeur"):
                     gdf_socio_local = gdf_socio_local.drop(columns=['index_right'], errors='ignore')
 
                 # 3. Bâtiments & Risques (Audit)
+                minx, miny, maxx, maxy = geom_zone.bounds
+
+                if show_batiments:
+                    raw_bats = rechercher_batiments_osm(bbox)
+                    if not raw_bats.empty:
+                        # --- CORRECTION : APPLICATION DU FILTRE SURFACE ICI ---
+                        # On ne garde que les bâtiments dans la fourchette demandée (ex: 100 à 150m²)
+                        raw_bats = raw_bats[
+                            (raw_bats['surface_m2'] >= surf_min) &
+                            (raw_bats['surface_m2'] <= surf_max)
+                        ].copy()
+
+                        if not raw_bats.empty:
+                            gdf_bats_temp = auditer_risque_batiments(raw_bats, gdf_inond_full, "Inondation")
+                            gdf_bats = auditer_risque_batiments(gdf_bats_temp, gdf_rga_full, "Argile")
+                            gdf_bats = gdf_bats[gdf_bats.intersects(geom_zone)].copy()
+                        else:
+                            gdf_bats = gpd.GeoDataFrame()
+                    else:
+                        gdf_bats = gpd.GeoDataFrame()
+
+                # 3. Bâtiments & Risques (Audit)
+                # OPTIMISATION : On définit d'abord la boite englobante (bbox) pour filtrer AVANT de calculer
+                minx, miny, maxx, maxy = geom_zone.bounds
+
                 if show_batiments:
                     raw_bats = rechercher_batiments_osm(bbox)
                     if not raw_bats.empty:
                         gdf_bats_temp = auditer_risque_batiments(raw_bats, gdf_inond_full, "Inondation")
                         gdf_bats = auditer_risque_batiments(gdf_bats_temp, gdf_rga_full, "Argile")
-                        gdf_bats = gdf_bats[gdf_bats.within(geom_zone)].copy()
+                        # CORRECTION : 'intersects' est plus tolérant que 'within' pour les bâtiments en bordure
+                        gdf_bats = gdf_bats[gdf_bats.intersects(geom_zone)].copy()
 
-                        # 4. Cannibalisation
+                # 4. Cannibalisation
                 if mode_cannibale and not gdf_reseau_client.empty:
                     taux_can, gdf_iso_reseau_visu = calculer_cannibalisation(geom_zone, gdf_reseau_client)
 
-                # 5. Immobilier (Filtre spatial simple)
-                df_dvf_local = df_dvf_full[
-                    (df_dvf_full.latitude.between(final_lat - 0.02, final_lat + 0.02)) &
-                    (df_dvf_full.longitude.between(final_lon - 0.02, final_lon + 0.02))
-                    ].copy()
+                # 5. Immobilier (Filtre spatial STRICT : Intersection Géométrique)
+                # On filtre d'abord large (carré) pour la performance
+                df_dvf_temp = df_dvf_full[
+                    (df_dvf_full.latitude.between(miny, maxy)) &
+                    (df_dvf_full.longitude.between(minx, maxx))
+                ].copy()
 
-                # 6. Calculs GeoScore
+                # Puis on filtre FIN (Geopandas : within zone)
+                if not df_dvf_temp.empty:
+                    gdf_dvf_temp = gpd.GeoDataFrame(
+                        df_dvf_temp,
+                        geometry=gpd.points_from_xy(df_dvf_temp.longitude, df_dvf_temp.latitude),
+                        crs="EPSG:4326"
+                    )
+                    df_dvf_local = gpd.sjoin(gdf_dvf_temp, gpd.GeoDataFrame(geometry=[geom_zone], crs="EPSG:4326"), how="inner", predicate="within")
+                    df_dvf_local = pd.DataFrame(df_dvf_local.drop(columns=['geometry', 'index_right'], errors='ignore'))
+                else:
+                    df_dvf_local = pd.DataFrame()
+
+                # 6. Calculs GeoScore (VRAI CALCUL DE SURFACE RISQUE OPTIMISÉ)
                 pop, rev, nb_dvf = 5000, 30000, len(df_dvf_local)
-                score_inond_max, ratio_surf_inond = 3, 0.2
-                score_rga_max, ratio_surf_rga = 2, 0.1
 
                 if not gdf_socio_local.empty:
                     pop = gdf_socio_local['Population_totale'].sum()
-                    rev = gdf_socio_local[
-                        'Revenu_median'].mean() if 'Revenu_median' in gdf_socio_local.columns else 20000
+                    rev = gdf_socio_local['Revenu_median'].mean() if 'Revenu_median' in gdf_socio_local.columns else 20000
+
+                # --- CALCUL RÉEL DES SURFACES A RISQUE (OPTIMISÉ) ---
+                score_inond_max = 0
+                ratio_surf_inond = 0.0
+
+                # Création d'un GDF de la zone pour les intersections
+                gdf_zone_calc = gpd.GeoDataFrame(geometry=[geom_zone], crs="EPSG:4326").to_crs("EPSG:2154")
+
+                if not gdf_inond_full.empty:
+                    try:
+                        # OPTIMISATION MAJEURE : On ne prend que les risques DANS le carré de la zone
+                        # .cx[minx:maxx, miny:maxy] fait un filtre spatial indexé ultra-rapide
+                        gdf_inond_small = gdf_inond_full.cx[minx:maxx, miny:maxy]
+
+                        if not gdf_inond_small.empty:
+                            # Overlay uniquement sur la petite sélection
+                            gdf_inond_clip = gpd.overlay(gdf_inond_small.to_crs("EPSG:2154"), gdf_zone_calc, how='intersection')
+                            if not gdf_inond_clip.empty:
+                                surf_inond = gdf_inond_clip.area.sum() / 1_000_000 # km2
+                                ratio_surf_inond = min(surf_inond / surface_zone_km2, 1.0)
+                                if 'NIVEAU_ALEA' in gdf_inond_clip.columns:
+                                    nivs = gdf_inond_clip['NIVEAU_ALEA'].unique()
+                                    if any('Fort' in str(n) for n in nivs): score_inond_max = 3
+                                    elif any('Moyen' in str(n) for n in nivs): score_inond_max = 2
+                                    else: score_inond_max = 1
+                    except Exception as e:
+                        print(f"Erreur calcul inondation: {e}")
+
+                score_rga_max = 0
+                ratio_surf_rga = 0.0
+                if not gdf_rga_full.empty:
+                    try:
+                        # OPTIMISATION MAJEURE IDEM
+                        gdf_rga_small = gdf_rga_full.cx[minx:maxx, miny:maxy]
+
+                        if not gdf_rga_small.empty:
+                            gdf_rga_clip = gpd.overlay(gdf_rga_small.to_crs("EPSG:2154"), gdf_zone_calc, how='intersection')
+                            if not gdf_rga_clip.empty:
+                                surf_rga = gdf_rga_clip.area.sum() / 1_000_000
+                                ratio_surf_rga = min(surf_rga / surface_zone_km2, 1.0)
+                                if 'NIVEAU_ALEA' in gdf_rga_clip.columns:
+                                    nivs = gdf_rga_clip['NIVEAU_ALEA'].unique()
+                                    if any('Fort' in str(n) for n in nivs): score_rga_max = 3
+                                    elif any('Moyen' in str(n) for n in nivs): score_rga_max = 2
+                                    else: score_rga_max = 1
+                    except Exception as e:
+                         print(f"Erreur calcul RGA: {e}")
 
                 score_final, parts, malus_c, malus_i, malus_r, ex = _calculer_score_attractivite(
                     pop, rev, nb_dvf, score_inond_max, ratio_surf_inond, score_rga_max, ratio_surf_rga, taux_can,
@@ -244,9 +361,78 @@ with st.container():
     st.markdown("---")
     st.markdown("##### ℹ️ Note Méthodologique & Détails du GeoScore")
 
-    with st.expander("Méthodologie Investisseur Détaillée (GeoScore)",
-                     expanded=True):
+    with st.expander("Méthodologie Investisseur Détaillée (GeoScore)", expanded=True):
         if is_polygonal:
+            # On définit le contenu HTML proprement avant l'affichage pour éviter les bugs de rendu
+            html_table_methodo = """
+            <style>
+                .methodo-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 13px; }
+                .methodo-th { background-color: #f0f2f6; border-bottom: 2px solid #ddd; text-align: left; padding: 8px; font-weight: bold; }
+                .methodo-td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }
+                .methodo-center { text-align: center; }
+                .methodo-bold { font-weight: bold; }
+            </style>
+            <table class="methodo-table">
+                <thead>
+                    <tr>
+                        <th class="methodo-th">Composante</th>
+                        <th class="methodo-th" style="text-align:center;">Poids</th>
+                        <th class="methodo-th">Règle de Calcul & Exemples</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="methodo-td methodo-bold">📈 Potentiel </td>
+                        <td class="methodo-td methodo-center">+40 pts<br><small>(Socle)</small></td>
+                        <td class="methodo-td">
+                            Évalue la profondeur du marché local.<br>
+                            <ul>
+                                <li><b>Densité (20 pts) :</b> Max si > 5000 hab/km².</li>
+                                <li><b>Revenus (20 pts) :</b> Max si Rev. Médian > 25 000€.</li>
+                            </ul>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="methodo-td methodo-bold">🚀 Dynamisme </td>
+                        <td class="methodo-td methodo-center">+30 pts<br><small>(Flux)</small></td>
+                        <td class="methodo-td">
+                            Évalue la liquidité et l'attractivité.<br>
+                            <ul>
+                                <li><b>Volume DVF (15 pts) :</b> Basé sur les ventes/km² (2 ans).</li>
+                                <li><b>Tension Prix (15 pts) :</b> Bonus si Prix m² > Moyenne Dept.</li>
+                            </ul>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="methodo-td methodo-bold">🛡️ Résilience </td>
+                        <td class="methodo-td methodo-center">+30 pts<br><small>(Climat)</small></td>
+                        <td class="methodo-td">
+                            Le malus grignote ce capital sécurité.<br>
+                            <b>🌊 Inondation (Max -20 pts) :</b>
+                            <ul>
+                                <li>-10 pts : Risque Fort sur 50% du terrain.</li>
+                            </ul>
+                            <b>☀️ Sécheresse (Max -10 pts) :</b>
+                            <ul>
+                                <li>-10 pts : Risque Fort sur 100% du terrain.</li>
+                            </ul>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="methodo-td methodo-bold">🛑 Saturation</td>
+                        <td class="methodo-td methodo-center">Malus<br><small>(Reseau)</small></td>
+                        <td class="methodo-td">
+                            Pénalité si chevauchement avec magasin existant.<br>
+                            <ul>
+                                <li><b>-15 pts :</b> Chevauchement de 20%.</li>
+                                <li><b>-30 pts :</b> Chevauchement > 30%.</li>
+                            </ul>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            """
+
             t_data, t_method = st.tabs(["🔍 Données de la Zone", "📊 Barème & Logique de Calcul"])
 
             with t_data:
@@ -264,26 +450,10 @@ with st.container():
                         st.write(f"- Saturation : **{ex.get('Malus Saturation', 'N/A')}**")
 
             with t_method:
-                # Présentation plus agréable du barème (Tableau HTML)
-                html_table = """
-                <table style="width:100%; border-collapse: collapse; font-family: sans-serif; font-size: 13px;">
-                <thead><tr style="background-color: #f0f2f6; border-bottom: 2px solid #ddd;">
-                    <th style="text-align: left; padding: 8px;">Composante</th>
-                    <th style="text-align: center; padding: 8px;">Poids</th>
-                    <th style="text-align: left; padding: 8px;">Détail de la Règle de Calcul</th>
-                </tr></thead><tbody>
-                    <tr><td style="font-weight: bold; padding: 8px;">📈 Potentiel</td><td style="text-align: center; padding: 8px;">40 pts</td><td style="padding: 8px;">Facteurs : Densité de Population (20 pts - Max 2500 hab/km²) et Revenu Médian (20 pts - Max 28k€).</td></tr>
-                    <tr><td style="font-weight: bold; padding: 8px;">🚀 Dynamisme</td><td style="text-align: center; padding: 8px;">30 pts</td><td style="padding: 8px;">Liquidité Immobilière : Basé sur la densité des transactions DVF sur 2 ans. (Max 30 pts si > 10 ventes/km²).</td></tr>
-                    <tr><td style="font-weight: bold; padding: 8px;">🛡️ Résilience</td><td style="text-align: center; padding: 8px;">30 pts</td><td style="padding: 8px;">Malus appliqués au capital initial (30 pts), pondérés par la surface touchée par les risques Inondation et Sécheresse/Argile.</td></tr>
-                </tbody></table>
-                """
-                st.markdown(html_table, unsafe_allow_html=True)
-                st.caption(
-                    f"Note: Le score total est minoré par un Malus de Saturation (Max -30 pts) si le taux de cannibalisation dépasse 10%. Malus Canibalisme actuel: -{malus_c:.1f} pts.")
+                st.markdown(html_table_methodo, unsafe_allow_html=True)
 
         else:
-            st.warning(
-                "Sélectionnez une zone d'étude (Isochrone ou Cercle) pour afficher les détails méthodologiques du GeoScore.")
+            st.warning("Sélectionnez une zone d'étude pour afficher les détails.")
 
 st.markdown("---")
 
@@ -293,17 +463,32 @@ st.subheader("Cartographie")
 afficher_dvf_global = st.session_state.afficher_dvf
 df_dvf_a_afficher = df_dvf_local if afficher_dvf_global else None
 
-# Préparation des GDF Risques MAP (Récupération des GDF filtrés du bloc de calcul)
-gdf_inond_map_safe = gdf_inond_full.cx[geom_zone.bounds[0]:geom_zone.bounds[2],
-                     geom_zone.bounds[1]:geom_zone.bounds[3]] if is_polygonal and show_inond else gpd.GeoDataFrame()
-gdf_rga_map_safe = gdf_rga_full.cx[geom_zone.bounds[0]:geom_zone.bounds[2],
-                   geom_zone.bounds[1]:geom_zone.bounds[3]] if is_polygonal and show_rga else gpd.GeoDataFrame()
+# Préparation des GDF Risques MAP (DÉCOUPE STRICTE POUR VISUEL PROPRE)
+gdf_inond_map_safe = gpd.GeoDataFrame()
+gdf_rga_map_safe = gpd.GeoDataFrame()
+
+if is_polygonal and geom_zone:
+    gdf_zone_visu = gpd.GeoDataFrame(geometry=[geom_zone], crs="EPSG:4326")
+
+    # On découpe les risques pour ne garder que ce qui est DANS la zone (Overlay)
+    if show_inond and not gdf_inond_full.empty:
+        try:
+            gdf_inond_map_safe = gpd.overlay(gdf_inond_full.to_crs("EPSG:4326"), gdf_zone_visu, how='intersection')
+        except:
+            pass
+
+    if show_rga and not gdf_rga_full.empty:
+        try:
+            gdf_rga_map_safe = gpd.overlay(gdf_rga_full.to_crs("EPSG:4326"), gdf_zone_visu, how='intersection')
+        except:
+            pass
 
 if final_lat is not None:
     try:
-        m = creer_carte_implantation(
+        # Appel modifié pour récupérer la légende socio (cmap_socio)
+        m, cmap_socio = creer_carte_implantation(
             final_lat, final_lon, geom_zone,
-            gdf_poi=gdf_poi,
+            gdf_poi_trouves=gdf_poi,
             gdf_socio=gdf_socio_local, colonne_socio=col_socio, nom_indicateur_socio=lbl_socio,
             gdf_batiments=gdf_bats,
             gdf_inondations=gdf_inond_map_safe,
@@ -314,52 +499,55 @@ if final_lat is not None:
             gdf_reseau_cannibale=gdf_iso_reseau_visu
         )
 
-        with st.container():
+        # MISE EN PAGE : 3/4 Carte | 1/4 Légende Latérale
+        c_map, c_legend = st.columns([3, 1])
+
+        with c_map:
             st_folium(m, height=500, use_container_width=True,
                       key="folium_map_p02_stable",
-                      # --- CORRECTION C V1 : ELIMINATION BOUCLE INFINIE ---
                       returned_objects=[])
 
+        with c_legend:
+            st.markdown("#### Légende")
+            with st.container(border=True):
+
+                # A. Légende Socio-Démographique (si active)
+                if cmap_socio and col_socio:
+                    st.caption(f"📊 {lbl_socio}")
+                    # Barre de dégradé visuelle
+                    st.markdown(
+                        '<div style="background: linear-gradient(to right, #ffffcc, #fd8d3c, #800026); width: 100%; height: 10px; border-radius: 5px; margin-bottom:5px;"></div>',
+                        unsafe_allow_html=True)
+                    # Bornes Min/Max récupérées de l'objet cmap
+                    st.caption(f"Min: {cmap_socio.vmin:,.0f} | Max: {cmap_socio.vmax:,.0f}")
+                    st.divider()
+
+                # B. Légende Risques (si active)
+                if show_inond:
+                    st.caption("🌊 Inondation")
+                    st.markdown(
+                        """<div style="font-size:13px; line-height:1.5; margin-bottom:10px;">
+                        <span style="color:#08306b;">■</span> Aléa Fort<br>
+                        <span style="color:#2171b5;">■</span> Aléa Moyen<br>
+                        <span style="color:#6baed6;">■</span> Aléa Faible
+                        </div>""", unsafe_allow_html=True)
+
+                if show_rga:
+                    st.caption("☀️ Sécheresse")
+                    st.markdown(
+                        """<div style="font-size:13px; line-height:1.5;">
+                        <span style="color:#5D4037;">■</span> Aléa Fort<br>
+                        <span style="color:#8D6E63;">■</span> Aléa Moyen<br>
+                        <span style="color:#D7CCC8;">■</span> Aléa Faible
+                        </div>""", unsafe_allow_html=True)
+
+                # Message si rien n'est affiché
+                if not (cmap_socio and col_socio) and not show_inond and not show_rga:
+                    st.info("Aucun calque actif.")
+
     except Exception as e:
-        st.error(f"Erreur critique de rendu cartographique (st_folium) : {e}. Affichage du point central par défaut.")
+        st.error(f"Erreur critique de rendu cartographique : {e}. Affichage du point central par défaut.")
         st.map(pd.DataFrame({'lat': [final_lat], 'lon': [final_lon]}), size=10)
-
-# --- NOUVEAU : LÉGENDE DES RISQUES ET SOCIO APRÈS LA CARTE (Correction V2) ---
-if is_polygonal:
-
-    st.markdown("##### Légendes des Calques")
-    c_leg_socio, c_leg_risk = st.columns(2)
-
-    # Légende Socio (si activée)
-    with c_leg_socio:
-        if gdf_socio_local is not None and col_socio is not None and lbl_socio is not None and not gdf_socio_local.empty:
-            st.caption(f"📊 {lbl_socio}")
-            st.markdown(
-                '<div style="background: linear-gradient(to right, #ffffcc, #fd8d3c, #800026); width: 100%; height: 10px; border-radius: 5px;"></div>',
-                unsafe_allow_html=True)
-            if not gdf_socio_local.empty and col_socio in gdf_socio_local.columns:
-                st.caption(
-                    f"Min: {gdf_socio_local[col_socio].min():,.0f} | Max: {gdf_socio_local[col_socio].max():,.0f}")
-        else:
-            st.info("Aucun indicateur socio affiché.")
-
-    # Légende Risques (si activée)
-    with c_leg_risk:
-        if show_inond or show_rga:
-            st.caption("🌪️ Risques : Niveau d'Aléa")
-            # Homogénéisation des symboles de risque
-            st.markdown(
-                """
-                <div style="font-size:13px; line-height:1.5;">
-                    🌊 <span style="font-weight:bold;">Inondation & Sécheresse</span><br>
-                    <span style="color:#e74c3c;">■</span> Aléa Fort<br>
-                    <span style="color:#e67e22;">■</span> Aléa Moyen<br>
-                    <span style="color:#95a5a6;">■</span> Aléa Faible
-                </div>
-                """,
-                unsafe_allow_html=True)
-        else:
-            st.info("Aucun risque affiché.")
 
 # --- ONGLETS THÉMATIQUES ---
 st.markdown("---")
@@ -498,31 +686,71 @@ with tab_immo:
 # --- ONGLET 🚦 Générateurs de Trafic (Locomotives) ---
 with tab_loco:
     if not is_polygonal:
-        st.info("Sélectionnez une zone (Isochrone ou Cercle) pour analyser les générateurs de trafic.")
+        st.info("Sélectionnez une zone pour analyser les générateurs de trafic.")
     else:
         st.subheader("Pôles d'Attraction (Locomotives)")
 
-        from backend.calculators import analyser_locomotives as calc_loco
+        # --- VRAI CALCUL SPATIAL (Plus de dummy data) ---
+        from config import LOCOMOTIVES_CONFIG
 
-        with st.spinner("Analyse des flux..."):
-            df_loc, score_loc = calc_loco(geom_zone)
+        loco_results = []
+        total_score_flux = 0
 
-        if not df_loc.empty:
+        with st.spinner("Analyse des flux réels dans la zone..."):
+            # On boucle sur la config pour chercher chaque type de locomotive
+            for cat, conf in LOCOMOTIVES_CONFIG.items():
+                tags = conf['tags']
+                poids = conf['poids']
 
-            # CRITIQUE : AFFICHAGE HISTOGRAMME (Restauré)
-            st.markdown(f"**Score de Flux : {score_loc} / 100**")
+                # 1. Recherche large (Bbox)
+                gdf_tmp = rechercher_poi_overpass(geom_zone.bounds, tags)
 
-            try:
-                fig_loco = plot_locomotives_histogram(df_loc)
+                if not gdf_tmp.empty:
+                    # 2. Filtre Strict (Dans l'Isochrone)
+                    gdf_in_zone = gdf_tmp[gdf_tmp.within(geom_zone)]
+
+                    count = len(gdf_in_zone)
+                    if count > 0:
+                        # Calcul du score (Poids x Nombre, plafonné pour éviter l'explosion)
+                        score_cat = min(count * poids, 30)
+                        total_score_flux += score_cat
+
+                        # Récupération des noms pour l'affichage
+                        exemples = ", ".join(gdf_in_zone['name'].fillna('Inconnu').head(3).tolist())
+
+                        loco_results.append({
+                            "Catégorie": cat,
+                            "Nombre": count,
+                            "Impact Trafic": score_cat,  # Score relatif
+                            "Exemples": exemples
+                        })
+
+            # Normalisation du score total sur 100
+            score_final_loco = min(total_score_flux, 100)
+
+        if loco_results:
+            df_loc = pd.DataFrame(loco_results).sort_values("Impact Trafic", ascending=False)
+
+            c_score, c_chart = st.columns([1, 2])
+            with c_score:
+                st.metric("Score de Flux", f"{score_final_loco}/100")
+                if score_final_loco > 70:
+                    st.success("Zone de fort passage")
+                elif score_final_loco > 40:
+                    st.info("Passage modéré")
+                else:
+                    st.warning("Zone calme")
+
+            with c_chart:
+                fig_loco = px.bar(
+                    df_loc, x="Impact Trafic", y="Catégorie", orientation='h',
+                    text="Nombre", color="Impact Trafic", title="Contribution au Trafic"
+                )
                 st.plotly_chart(fig_loco, use_container_width=True)
-            except Exception:
-                st.error("Erreur de rendu de l'histogramme des Locomotives.")
 
-            st.markdown("---")
-            st.caption("Détail des locomotives trouvées:")
-            st.dataframe(df_loc[['Catégorie', 'Nombre', 'Exemples']].head(5), hide_index=True, use_container_width=True)
+            st.dataframe(df_loc[['Catégorie', 'Nombre', 'Exemples']], hide_index=True, use_container_width=True)
         else:
-            st.info("📉 Aucun générateur de trafic majeur détecté par l'API OSM dans la zone d'étude.")
+            st.warning("📉 Aucun générateur de trafic majeur (Gare, Lycée, Mall...) détecté DANS votre zone.")
 
 # --- ONGLET 🏗️ Risques & Technique ---
 with tab_tech:
@@ -600,3 +828,4 @@ with tab_tech:
         st.caption("🌡️ Confort Thermique (Ilot de Fraîcheur)")
         st.metric("Taux de Végétalisation", f"{ratio_veg:.1f}%")
         st.progress(min(ratio_veg / 100, 1.0), "Score de végétalisation")
+

@@ -117,11 +117,11 @@ def sidebar_filtres_batiments():
     if show:
         # CRITIQUE : Démarrage par défaut à 100m² min et 3000m² max
         c1, c2 = st.columns(2)
-        surface_min = c1.number_input("Min m²", 0, 10000, 100, step=50, key="surf_min_bat")
-        surface_max = c2.number_input("Max m²", 0, 100000, 3000, step=100, key="surf_max_bat")
+        surface_min = c1.number_input("Min m²", 0, 10000, 100, step=10, key="surf_min_bat")
+        surface_max = c2.number_input("Max m²", 0, 100000, 150, step=10, key="surf_max_bat")
     else:
         # Renvoyer les valeurs par défaut
-        surface_min, surface_max = 100, 3000
+        surface_min, surface_max = 100, 150
     return show, surface_min, surface_max
 
 
@@ -231,7 +231,7 @@ def selection_point_central(engine):
 
     if 'poi_selection_resultat' not in st.session_state:
         st.session_state['poi_selection_resultat'] = {
-            "source": None, "valeur": None, "mode": "Isochrones", "radius": 1000
+            "source": None, "valeur": None, "mode": "Point seul", "radius": 1000
         }
 
     resultat = st.session_state['poi_selection_resultat']
@@ -248,7 +248,7 @@ def selection_point_central(engine):
         on_change=lambda: st.session_state.update(
             siren_results_comp=None,
             siret_info_comp=None,
-            poi_selection_resultat={"source": None, "valeur": None, "mode": "Isochrones", "radius": 1000}
+            poi_selection_resultat={"source": None, "valeur": None, "mode": "Point seul", "radius": 1000}
         )
     )
     resultat["source"] = source_choix
@@ -309,12 +309,23 @@ def selection_point_central(engine):
         horizontal=True,
         label_visibility="collapsed",
         key="mode_analyse_main",
+        # Gestion de l'index par défaut selon le state
         index=["Point seul", "Isochrones", "Cercle d'influence"].index(resultat["mode"])
-        if resultat["mode"] in ["Point seul", "Isochrones", "Cercle d'influence"] else 1
+        if resultat["mode"] in ["Point seul", "Isochrones", "Cercle d'influence"] else 0
     )
     resultat["mode"] = mode
 
-    if mode == "Cercle d'influence":
+    if mode == "Isochrones":
+        # CORRECTION : Défaut 5 min au lieu de 10
+        temps_min = st.slider("Temps (min)", 1, 30, 5, 1, key="poi_iso_slider")
+        # On stocke en secondes pour l'API (5 * 60 = 300s)
+        # Note: L'API attend des secondes, mais on stocke ici le paramètre brut si besoin,
+        # c'est la page 02 qui fait la conversion x60.
+        # ATTENTION : La page 02 utilise calcule_isochrone_api(..., 600).
+        # On va devoir passer cette valeur dynamique.
+        resultat["radius"] = temps_min * 60
+
+    elif mode == "Cercle d'influence":
         radius_km = st.slider("Rayon (km)", 0.1, 5.0, resultat["radius"] / 1000 if resultat["radius"] else 1.0, 0.1,
                               key="poi_radius_slider")
         resultat["radius"] = int(radius_km * 1000)
