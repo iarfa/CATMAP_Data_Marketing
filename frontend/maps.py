@@ -23,20 +23,47 @@ RISQUES_ABS_MAP = {
 # HELPERS COUCHES DVF (Inchangé)
 # =================================================================
 
+def _filtrer_dvf_data(df, type_filtre):
+    """
+    Traduit le choix utilisateur (UI) en termes techniques (Data).
+    """
+    if df is None or df.empty: return pd.DataFrame()
+
+    df_clean = df.copy()
+
+    # Mapping UI -> Data
+    if type_filtre == "Résidentiel":
+        # On cible les logements
+        return df_clean[df_clean['type_local'].isin(['Maison', 'Appartement'])]
+
+    elif type_filtre == "Commercial":
+        # On cible les locaux commerciaux (Recherche large "Local")
+        return df_clean[df_clean['type_local'].str.contains('Local', case=False, na=False)]
+
+    # Si "Tous", on renvoie tout
+    return df_clean
+
+
 def _ajouter_couche_dvf_heatmap(m, df_dvf, type_filtre="Tous"):
-    """Ajoute une Heatmap DVF (Logique conservée)."""
+    """Ajoute une Heatmap DVF avec filtrage correct."""
     if df_dvf is None or df_dvf.empty: return
 
-    max_val = df_dvf['prix_m2'].quantile(0.95)
-    data = df_dvf[['latitude', 'longitude', 'prix_m2']].copy()
+    # 1. Filtrage
+    df_filtered = _filtrer_dvf_data(df_dvf, type_filtre)
+    if df_filtered.empty: return
+
+    # 2. Préparation
+    max_val = df_filtered['prix_m2'].quantile(0.95)
+    data = df_filtered[['latitude', 'longitude', 'prix_m2']].copy()
     data['prix_m2'] = data['prix_m2'].clip(upper=max_val)
     heat_data = data[['latitude', 'longitude', 'prix_m2']].values.tolist()
 
-    if "Commerce" in type_filtre:
-        gradient = {0.2: '#807dba', 0.5: '#e08214', 1.0: '#b30000'}
+    # 3. Style dynamique
+    if type_filtre == "Commercial":
+        gradient = {0.2: '#807dba', 0.5: '#e08214', 1.0: '#b30000'}  # Violet -> Rouge
         name_layer = "🔥 Heatmap: Coût Commercial"
     else:
-        gradient = {0.2: '#4575b4', 0.4: '#91bfdb', 0.6: '#fee090', 0.8: '#fc8d59', 1.0: '#d73027'}
+        gradient = {0.2: '#4575b4', 0.4: '#91bfdb', 0.6: '#fee090', 0.8: '#fc8d59', 1.0: '#d73027'}  # Bleu -> Rouge
         name_layer = "🔥 Heatmap: Prix Résidentiel"
 
     HeatMap(
@@ -49,74 +76,84 @@ def _ajouter_couche_dvf_heatmap(m, df_dvf, type_filtre="Tous"):
 
 def _ajouter_couche_dvf_points(m, df_dvf, type_filtre="Tous"):
     """
-    Ajoute les transactions DVF sous forme de points simples et fonctionnels (interactifs).
-    (Logique conservée).
+    Ajoute les transactions DVF (Points) avec Popup Riche.
     """
     if df_dvf is None or df_dvf.empty: return None
 
-    df_clean = df_dvf.dropna(subset=['latitude', 'longitude', 'prix_m2', 'date_mutation']).copy()
+    # 1. Filtrage
+    df_clean = _filtrer_dvf_data(df_dvf, type_filtre)
 
-    if type_filtre != "Tous":
-        df_clean = df_clean[df_clean['type_local'] == type_filtre]
-
+    # 2. Nettoyage technique (Coordonnées obligatoires)
+    df_clean = df_clean.dropna(subset=['latitude', 'longitude', 'prix_m2']).copy()
     if df_clean.empty: return None
 
-    COLOR_DEFAULT = '#3388ff'
-    COLOR_COMMERCE = '#FF7F0E'
+    # 3. Configuration visuelle
+    COLOR_DEFAULT = '#3388ff'  # Bleu (Résidentiel)
+    COLOR_COMMERCE = '#FF7F0E'  # Orange (Commercial)
 
     fg_dvf = folium.FeatureGroup(name=f"Transactions DVF ({type_filtre})", show=True)
 
+    # Sécurité Volumétrie : On limite à 2000 points aléatoires pour ne pas crasher le navigateur
+    if len(df_clean) > 2000:
+        df_clean = df_clean.sample(2000)
+
     for _, row in df_clean.iterrows():
         lat, lon = row['latitude'], row['longitude']
+
+        # Données brutes
         prix_m2 = row.get('prix_m2', 0)
         valeur = row.get('valeur_fonciere', 0)
         surface = row.get('surface_reelle_bati', 0)
         type_loc = row.get('type_local', 'Indéfini')
 
-        # SÉCURITÉ DATE : Conversion sécurisée de l'objet Timestamp
+        # Formatage Date (YYYY-MM-DD)
         date_raw = row.get('date_mutation', 'N/A')
-        date_txt = 'N/A'
-        try:
-            if isinstance(date_raw, pd.Timestamp):
-                date_txt = date_raw.strftime('%Y-%m-%d')
-            else:
-                date_txt = str(date_raw)[:10]
-        except Exception:
-            date_txt = 'N/A'
+        date_txt = str(date_raw)[:10]
 
-        point_color = COLOR_COMMERCE if "LOCAL" in str(type_loc).upper() else COLOR_DEFAULT
+        # Choix couleur
+        point_color = COLOR_COMMERCE if "Local" in str(type_loc) else COLOR_DEFAULT
 
-        # --- CONTENU POPUP (CLIC) ---
+        # --- POPUP HTML ENRICHI ---
         popup_html = f"""
-        <div style='font-family:sans-serif; font-size:13px; min-width:180px;'>
-            <h5 style='margin:0; padding-bottom:5px; border-bottom:2px solid {point_color}; color:#333;'>
-                Transaction DVF
+        <div style='font-family:sans-serif; font-size:12px; min-width:200px;'>
+            <h5 style='margin:0 0 8px 0; border-bottom:3px solid {point_color}; color:#333; padding-bottom:4px;'>
+                {type_loc}
             </h5>
-            <ul style='list-style-type:none; padding-left:0; margin-top:8px; line-height:1.4em;'>
-                <li>📅 <b>Date :</b> {date_txt}</li>
-                <li>🏠 <b>Type :</b> {type_loc}</li>
-                <li>📏 <b>Surface :</b> {surface:.0f} m²</li>
-                <li>💰 <b>Prix Total :</b> {valeur:,.0f} €</li>
-                <li style='margin-top:5px; font-weight:bold; color:#d7191c; font-size:14px;'>
-                    📊 {prix_m2:,.0f} €/m²
-                </li>
-            </ul>
+            <table style='width:100%; border-collapse:collapse;'>
+                <tr>
+                    <td style='color:#666;'>📅 Date</td>
+                    <td style='text-align:right; font-weight:bold;'>{date_txt}</td>
+                </tr>
+                <tr>
+                    <td style='color:#666;'>📏 Surface</td>
+                    <td style='text-align:right; font-weight:bold;'>{surface:.0f} m²</td>
+                </tr>
+                <tr>
+                    <td style='color:#666;'>💰 Prix Total</td>
+                    <td style='text-align:right; font-weight:bold;'>{valeur:,.0f} €</td>
+                </tr>
+                <tr style='border-top:1px solid #eee;'>
+                    <td style='color:#d7191c; padding-top:4px;'>📊 Prix m²</td>
+                    <td style='text-align:right; font-weight:bold; color:#d7191c; padding-top:4px;'>
+                        {prix_m2:,.0f} €
+                    </td>
+                </tr>
+            </table>
         </div>
         """
 
-        # --- CONTENU TOOLTIP (SURVOL) ---
-        tooltip_txt = f"{type_loc} ({prix_m2:,.0f} €/m²)"
+        tooltip_txt = f"{type_loc} | {prix_m2:,.0f} €/m²"
 
         folium.CircleMarker(
             location=[lat, lon],
-            radius=4,
-            color=point_color,
+            radius=5,  # Point légèrement plus gros
+            color='white',  # Contour blanc pour contraste
             weight=1,
             fill=True,
             fill_color=point_color,
-            fill_opacity=0.7,
+            fill_opacity=0.8,
             tooltip=tooltip_txt,
-            popup=folium.Popup(popup_html, max_width=300)
+            popup=folium.Popup(popup_html, max_width=250)
         ).add_to(fg_dvf)
 
     fg_dvf.add_to(m)

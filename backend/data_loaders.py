@@ -5,7 +5,6 @@ import streamlit as st
 from config import PATHS
 import os
 
-
 # =============================================================================
 # CHARGEURS DE DONNÉES (FILESYSTEM)
 # =============================================================================
@@ -14,14 +13,13 @@ import os
 def charger_communes() -> pd.DataFrame:
     """
     Charge le référentiel des communes (Excel).
-    Normalise les noms de colonnes pour garantir latitude/longitude standards.
+    Sécurisé : Ajoute lat/lon vides si absentes pour éviter le crash.
     """
     path = PATHS["COMMUNES"]
     try:
         df = pd.read_excel(path)
 
         # --- NORMALISATION CRITIQUE DES COLONNES ---
-        # On mappe les variations possibles vers les standards du projet
         rename_map = {
             'Longitude_Centre': 'longitude',
             'Latitude_Centre': 'latitude',
@@ -32,14 +30,20 @@ def charger_communes() -> pd.DataFrame:
         }
         df = df.rename(columns=rename_map)
 
-        # Standardisation du Code Département (toujours string, ex: '01' et non 1)
+        # Standardisation du Code Département
         if 'Num_Dep' in df.columns:
-            # On s'assure que c'est propre (suppression .0 si float, zfill)
             df['Num_Dep'] = df['Num_Dep'].astype(str).str.split('.').str[0].str.zfill(2)
 
-        # Vérification silencieuse pour le développeur (log console)
-        if 'latitude' not in df.columns or 'longitude' not in df.columns:
-            print(f"⚠️ ATTENTION LOADERS: Colonnes géo standards introuvables dans {path}. Colonnes présentes: {df.columns.tolist()}")
+        # --- FIX ROBUSTE : Création des colonnes manquantes ---
+        # Si le fichier Excel n'a pas de coordonnées, on crée les colonnes avec NaN
+        # pour que le reste de l'application ne plante pas (KeyError).
+        if 'latitude' not in df.columns:
+            # On log juste une info dans la console, pas d'erreur bloquante
+            print(f"⚠️ Info: Colonne 'latitude' absente de {path}. Création vide.")
+            df['latitude'] = None
+
+        if 'longitude' not in df.columns:
+            df['longitude'] = None
 
         return df
 
@@ -59,7 +63,6 @@ def charger_centres_departements() -> pd.DataFrame:
     except FileNotFoundError:
         return pd.DataFrame()
 
-
 @st.cache_data(show_spinner=False)
 def charger_donnees_iris_socio() -> gpd.GeoDataFrame:
     """Charge les données IRIS (Parquet) et force la projection GPS."""
@@ -75,7 +78,6 @@ def charger_donnees_iris_socio() -> gpd.GeoDataFrame:
         st.error(f"Erreur chargement IRIS : {e}")
         return gpd.GeoDataFrame()
 
-
 @st.cache_data(show_spinner=False)
 def charger_coefficients_trafic() -> pd.DataFrame:
     """Charge la table des coefficients de trafic (Excel)."""
@@ -84,7 +86,6 @@ def charger_coefficients_trafic() -> pd.DataFrame:
         return pd.read_excel(path)
     except FileNotFoundError:
         return pd.DataFrame(columns=['ville', 'coefficient'])
-
 
 @st.cache_data(show_spinner="Chargement DVF...")
 def charger_donnees_dvf() -> pd.DataFrame:
@@ -107,7 +108,6 @@ def charger_donnees_dvf() -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
-
 @st.cache_data(show_spinner="Chargement Risques...")
 def charger_zones_risques(type_risque: str) -> gpd.GeoDataFrame:
     """Chargeur générique pour les risques (Inondation ou RGA)."""
@@ -127,16 +127,27 @@ def charger_zones_risques(type_risque: str) -> gpd.GeoDataFrame:
 def charger_moteur_climat() -> pd.DataFrame:
     """
     Charge le fichier Parquet du Moteur Climat 2050.
+    CORRECTION : Charge toutes les colonnes pour éviter le bug de filtre manquant.
     """
-    path = PATHS["CLIMAT_2050"] # Utilise la clé définie dans config.py
+    path = PATHS["CLIMAT_2050"]  # Utilise la clé définie dans config.py
+
     if not os.path.exists(path):
         st.warning(f"Fichier Climat 2050 introuvable: {path}")
         return pd.DataFrame()
+
     try:
-        # Optimisation : On ne charge que les colonnes nécessaires
-        cols = ['lat_round', 'lon_round'] + [c for c in pd.read_parquet(path, columns=['lat_round', 'lon_round']).columns if 'RCP' in c]
-        df = pd.read_parquet(path, columns=cols)
+        # FIX : On lit simplement tout le fichier.
+        # Pandas est assez rapide pour gérer ça sans filtre complexe qui risque de casser.
+        df = pd.read_parquet(path)
+
+        # Sécurité : On vérifie que les colonnes vitales sont là
+        required = ['lat_round', 'lon_round']
+        if not all(col in df.columns for col in required):
+            st.error(f"Colonnes lat_round/lon_round manquantes dans {path}")
+            return pd.DataFrame()
+
         return df
+
     except Exception as e:
         st.error(f"Erreur chargement climat: {e}")
         return pd.DataFrame()

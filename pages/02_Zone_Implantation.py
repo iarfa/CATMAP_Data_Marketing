@@ -37,7 +37,7 @@ from utils.geo_tools import (
     analyser_environnement_naturel, projeter_climat_2050, extraire_ville_depuis_adresse,
     transfo_geodataframe
 )
-from config import POI_CONFIG, LOCOMOTIVES_CONFIG, PATHS
+from config import POI_CONFIG, PATHS
 
 # --- CONFIG ---
 st.title("📍 Diagnostic Territorial & Risques")
@@ -260,67 +260,71 @@ if target and target.get("valeur"):
                 else:
                     df_dvf_local = pd.DataFrame()
 
-                # 6. Calculs GeoScore (VRAI CALCUL DE SURFACE RISQUE OPTIMISÉ)
-                pop, rev, nb_dvf = 5000, 30000, len(df_dvf_local)
+                # 6. Calculs GeoScore & Risques Pondérés
+                pop = gdf_socio_local['Population_totale'].sum() if not gdf_socio_local.empty else 5000
+                rev = gdf_socio_local['Revenu_median'].mean() if not gdf_socio_local.empty and 'Revenu_median' in gdf_socio_local.columns else 20000
+                nb_dvf = len(df_dvf_local)
 
-                if not gdf_socio_local.empty:
-                    pop = gdf_socio_local['Population_totale'].sum()
-                    rev = gdf_socio_local['Revenu_median'].mean() if 'Revenu_median' in gdf_socio_local.columns else 20000
+                # --- FONCTION HELPER CALCUL SURFACE ---
+                def analyser_repartition_risque(gdf_full, geometry_zone, surface_zone_km2, minx, miny, maxx, maxy):
+                    """Retourne un dict {'Fort': 0.x, 'Moyen': 0.x, 'Faible': 0.x, 'Aucun': 0.x}"""
+                    stats = {"Fort": 0.0, "Moyen": 0.0, "Faible": 0.0, "Aucun": 1.0}
+                    if gdf_full.empty: return stats
 
-                # --- CALCUL RÉEL DES SURFACES A RISQUE (OPTIMISÉ) ---
-                score_inond_max = 0
-                ratio_surf_inond = 0.0
-
-                # Création d'un GDF de la zone pour les intersections
-                gdf_zone_calc = gpd.GeoDataFrame(geometry=[geom_zone], crs="EPSG:4326").to_crs("EPSG:2154")
-
-                if not gdf_inond_full.empty:
                     try:
-                        # OPTIMISATION MAJEURE : On ne prend que les risques DANS le carré de la zone
-                        # .cx[minx:maxx, miny:maxy] fait un filtre spatial indexé ultra-rapide
-                        gdf_inond_small = gdf_inond_full.cx[minx:maxx, miny:maxy]
+                        # 1. Filtre Spatial Rapide (Index)
+                        gdf_small = gdf_full.cx[minx:maxx, miny:maxy]
+                        if gdf_small.empty: return stats
 
-                        if not gdf_inond_small.empty:
-                            # Overlay uniquement sur la petite sélection
-                            gdf_inond_clip = gpd.overlay(gdf_inond_small.to_crs("EPSG:2154"), gdf_zone_calc, how='intersection')
-                            if not gdf_inond_clip.empty:
-                                surf_inond = gdf_inond_clip.area.sum() / 1_000_000 # km2
-                                ratio_surf_inond = min(surf_inond / surface_zone_km2, 1.0)
-                                if 'NIVEAU_ALEA' in gdf_inond_clip.columns:
-                                    nivs = gdf_inond_clip['NIVEAU_ALEA'].unique()
-                                    if any('Fort' in str(n) for n in nivs): score_inond_max = 3
-                                    elif any('Moyen' in str(n) for n in nivs): score_inond_max = 2
-                                    else: score_inond_max = 1
+                        # 2. Découpage Précis (Overlay)
+                        gdf_zone_calc = gpd.GeoDataFrame(geometry=[geometry_zone], crs="EPSG:4326").to_crs("EPSG:2154")
+                        gdf_clip = gpd.overlay(gdf_small.to_crs("EPSG:2154"), gdf_zone_calc, how='intersection')
+
+                        if gdf_clip.empty: return stats
+
+                        # 3. Somme des surfaces par niveau
+                        total_risk_pct = 0.0
+
+                        if 'NIVEAU_ALEA' in gdf_clip.columns:
+                            for idx, row in gdf_clip.iterrows():
+                                # Calcul surface du morceau en km2
+                                area_pct = (row.geometry.area / 1_000_000) / surface_zone_km2
+                                level = str(row['NIVEAU_ALEA']).lower()
+
+                                if 'fort' in level: stats["Fort"] += area_pct
+                                elif 'moyen' in level: stats["Moyen"] += area_pct
+                                elif 'faible' in level: stats["Faible"] += area_pct
+                                # Sinon on ignore ou on compte en faible par défaut
+
+                        # Normalisation (Au cas où superposition géométrique > 100%)
+                        sum_risks = stats["Fort"] + stats["Moyen"] + stats["Faible"]
+                        if sum_risks > 1.0:
+                            stats["Fort"] /= sum_risks
+                            stats["Moyen"] /= sum_risks
+                            stats["Faible"] /= sum_risks
+                            stats["Aucun"] = 0.0
+                        else:
+                            stats["Aucun"] = 1.0 - sum_risks
+
                     except Exception as e:
-                        print(f"Erreur calcul inondation: {e}")
+                        print(f"Erreur calcul surface risque: {e}")
 
-                score_rga_max = 0
-                ratio_surf_rga = 0.0
-                if not gdf_rga_full.empty:
-                    try:
-                        # OPTIMISATION MAJEURE IDEM
-                        gdf_rga_small = gdf_rga_full.cx[minx:maxx, miny:maxy]
+                    return stats
 
-                        if not gdf_rga_small.empty:
-                            gdf_rga_clip = gpd.overlay(gdf_rga_small.to_crs("EPSG:2154"), gdf_zone_calc, how='intersection')
-                            if not gdf_rga_clip.empty:
-                                surf_rga = gdf_rga_clip.area.sum() / 1_000_000
-                                ratio_surf_rga = min(surf_rga / surface_zone_km2, 1.0)
-                                if 'NIVEAU_ALEA' in gdf_rga_clip.columns:
-                                    nivs = gdf_rga_clip['NIVEAU_ALEA'].unique()
-                                    if any('Fort' in str(n) for n in nivs): score_rga_max = 3
-                                    elif any('Moyen' in str(n) for n in nivs): score_rga_max = 2
-                                    else: score_rga_max = 1
-                    except Exception as e:
-                         print(f"Erreur calcul RGA: {e}")
+                # CALCUL DES REPARTITIONS
+                stats_inond = analyser_repartition_risque(gdf_inond_full, geom_zone, surface_zone_km2, minx, miny, maxx, maxy)
+                stats_rga = analyser_repartition_risque(gdf_rga_full, geom_zone, surface_zone_km2, minx, miny, maxx, maxy)
 
+                # APPEL CALCULATEUR (Nouvelle Signature)
                 score_final, parts, malus_c, malus_i, malus_r, ex = _calculer_score_attractivite(
-                    pop, rev, nb_dvf, score_inond_max, ratio_surf_inond, score_rga_max, ratio_surf_rga, taux_can,
-                    surface_zone_km2
+                    pop, rev, nb_dvf,
+                    stats_inond, stats_rga, # On passe les dicts complets
+                    taux_can, surface_zone_km2
                 )
+
                 statut_zone, couleur_statut = generer_avis_synthetique(score_final, malus_i)
 
-                # 7. Statistiques d'âge (Environnement Business)
+                # 7. Ancienneté
                 if naf_ref and dep_ref_code:
                     age_stats = calculer_stats_anciennete(engine, naf_ref, "Département", dep_ref_code)
 
@@ -361,100 +365,167 @@ with st.container():
     st.markdown("---")
     st.markdown("##### ℹ️ Note Méthodologique & Détails du GeoScore")
 
-    with st.expander("Méthodologie Investisseur Détaillée (GeoScore)", expanded=True):
+    # Bloc Méthodologie V6 (CORRIGÉ & STABILISÉ)
+    with st.expander("ℹ️ Comprendre le calcul de votre GeoScore", expanded=False):
         if is_polygonal:
-            # On définit le contenu HTML proprement avant l'affichage pour éviter les bugs de rendu
-            html_table_methodo = """
-            <style>
-                .methodo-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 13px; }
-                .methodo-th { background-color: #f0f2f6; border-bottom: 2px solid #ddd; text-align: left; padding: 8px; font-weight: bold; }
-                .methodo-td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }
-                .methodo-center { text-align: center; }
-                .methodo-bold { font-weight: bold; }
-            </style>
-            <table class="methodo-table">
-                <thead>
-                    <tr>
-                        <th class="methodo-th">Composante</th>
-                        <th class="methodo-th" style="text-align:center;">Poids</th>
-                        <th class="methodo-th">Règle de Calcul & Exemples</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td class="methodo-td methodo-bold">📈 Potentiel </td>
-                        <td class="methodo-td methodo-center">+40 pts<br><small>(Socle)</small></td>
-                        <td class="methodo-td">
-                            Évalue la profondeur du marché local.<br>
-                            <ul>
-                                <li><b>Densité (20 pts) :</b> Max si > 5000 hab/km².</li>
-                                <li><b>Revenus (20 pts) :</b> Max si Rev. Médian > 25 000€.</li>
-                            </ul>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="methodo-td methodo-bold">🚀 Dynamisme </td>
-                        <td class="methodo-td methodo-center">+30 pts<br><small>(Flux)</small></td>
-                        <td class="methodo-td">
-                            Évalue la liquidité et l'attractivité.<br>
-                            <ul>
-                                <li><b>Volume DVF (15 pts) :</b> Basé sur les ventes/km² (2 ans).</li>
-                                <li><b>Tension Prix (15 pts) :</b> Bonus si Prix m² > Moyenne Dept.</li>
-                            </ul>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="methodo-td methodo-bold">🛡️ Résilience </td>
-                        <td class="methodo-td methodo-center">+30 pts<br><small>(Climat)</small></td>
-                        <td class="methodo-td">
-                            Le malus grignote ce capital sécurité.<br>
-                            <b>🌊 Inondation (Max -20 pts) :</b>
-                            <ul>
-                                <li>-10 pts : Risque Fort sur 50% du terrain.</li>
-                            </ul>
-                            <b>☀️ Sécheresse (Max -10 pts) :</b>
-                            <ul>
-                                <li>-10 pts : Risque Fort sur 100% du terrain.</li>
-                            </ul>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="methodo-td methodo-bold">🛑 Saturation</td>
-                        <td class="methodo-td methodo-center">Malus<br><small>(Reseau)</small></td>
-                        <td class="methodo-td">
-                            Pénalité si chevauchement avec magasin existant.<br>
-                            <ul>
-                                <li><b>-15 pts :</b> Chevauchement de 20%.</li>
-                                <li><b>-30 pts :</b> Chevauchement > 30%.</li>
-                            </ul>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-            """
+            t_resume, t_detail = st.tabs(["📝 Synthèse Notation", "📖 Guide Méthodologique"])
 
-            t_data, t_method = st.tabs(["🔍 Données de la Zone", "📊 Barème & Logique de Calcul"])
+            # 1. TAB SYNTHÈSE (Tableau de notes)
+            with t_resume:
+                # ÉTAPE 1 : Le CSS (Style) dans une chaîne brute sans f-string pour éviter les bugs
+                css_style = """
+                    <style>
+                        .geo-table {border-collapse: collapse; width: 100%; font-family: sans-serif; font-size: 14px;}
+                        .geo-table td {border-bottom: 1px solid #e0e0e0; padding: 10px 8px; vertical-align: middle;}
+                        .geo-table th {border-bottom: 2px solid #333; font-weight: bold; padding: 12px 8px; text-align: left; background-color: #f8f9fa; color: #333;}
+                        .geo-header {background-color: #f1f3f4; font-weight: bold; color: #1a73e8; text-transform: uppercase; font-size: 12px; letter-spacing: 0.5px;}
+                        .score-pos {color: #188038; font-weight: bold; background-color: #e6f4ea; padding: 4px 8px; border-radius: 4px; display: inline-block;}
+                        .score-neg {color: #d93025; font-weight: bold; background-color: #fce8e6; padding: 4px 8px; border-radius: 4px; display: inline-block;}
+                        .val-mono {font-family: monospace; color: #555; font-size: 13px;}
+                    </style>
+                    """
 
-            with t_data:
-                c_ex1, c_ex2 = st.columns(2)
-                with c_ex1:
-                    st.markdown("**Indicateurs Bruts**")
-                    st.write(f"- Densité Pop : **{ex.get('Densité Pop', 'N/A')}**")
-                    st.write(f"- Revenu Médian : **{ex.get('Revenu Médian', 'N/A')}**")
-                    st.write(f"- Densité Ventes : **{ex.get('Densité Ventes (2 ans)', 'N/A')}**")
-                with c_ex2:
-                    st.markdown("**Impact des Risques**")
-                    st.write(f"- Inondation : **{ex.get('Malus Inondation', 'N/A')}**")
-                    st.write(f"- Sécheresse : **{ex.get('Malus Sécheresse', 'N/A')}**")
-                    if mode_cannibale:
-                        st.write(f"- Saturation : **{ex.get('Malus Saturation', 'N/A')}**")
+                # ÉTAPE 2 : Le HTML (Contenu) avec f-string pour insérer les variables
+                html_content = f"""
+                    <table class="geo-table">
+                    <thead>
+                      <tr>
+                        <th>Critère</th>
+                        <th>Mesure sur Zone</th>
+                        <th>Impact Score</th>
+                        <th>Objectif / Seuil</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr class="geo-header"><td colspan="4">📈 Pilier 1 : Potentiel (40 pts)</td></tr>
+                      <tr>
+                        <td>Densité Population</td>
+                        <td class="val-mono">{ex['Densité']['val']}</td>
+                        <td><span class="score-pos">+{ex['Densité']['note']}</span></td>
+                        <td>Cible : {ex['Densité']['cible']}</td>
+                      </tr>
+                      <tr>
+                        <td>Pouvoir d'Achat</td>
+                        <td class="val-mono">{ex['Revenus']['val']}</td>
+                        <td><span class="score-pos">+{ex['Revenus']['note']}</span></td>
+                        <td>Cible : {ex['Revenus']['cible']}</td>
+                      </tr>
 
-            with t_method:
-                st.markdown(html_table_methodo, unsafe_allow_html=True)
+                      <tr class="geo-header"><td colspan="4">🚀 Pilier 2 : Dynamisme (30 pts)</td></tr>
+                      <tr>
+                        <td>Intensité Transactions</td>
+                        <td class="val-mono">{ex['Ventes']['val']}</td>
+                        <td><span class="score-pos">+{ex['Ventes']['note']}</span></td>
+                        <td>Cible : {ex['Ventes']['cible']}</td>
+                      </tr>
 
-        else:
-            st.warning("Sélectionnez une zone d'étude pour afficher les détails.")
+                      <tr class="geo-header"><td colspan="4">🛡️ Pilier 3 : Résilience (Capital 30 pts)</td></tr>
+                      <tr>
+                        <td>🌊 Inondation</td>
+                        <td class="val-mono">{ex['Inondation']['val']}</td>
+                        <td><span class="score-neg">{ex['Inondation']['malus']}</span></td>
+                        <td><i>Pondération Surface</i></td>
+                      </tr>
+                      <tr>
+                        <td>☀️ Sécheresse</td>
+                        <td class="val-mono">{ex['Secheresse']['val']}</td>
+                        <td><span class="score-neg">{ex['Secheresse']['malus']}</span></td>
+                        <td><i>Pondération Surface</i></td>
+                      </tr>
 
+                      <tr style="height:15px; border:none;"><td colspan="4" style="border:none;"></td></tr>
+                      <tr style="background-color:#fff5f5; border-left:4px solid #d93025;">
+                        <td>🛑 <b>Malus Saturation</b></td>
+                        <td class="val-mono">{ex['Saturation']['val']}</td>
+                        <td><span class="score-neg">{ex['Saturation']['malus']}</span></td>
+                        <td>Seuil tolérance : 10%</td>
+                      </tr>
+                    </tbody>
+                    </table>
+                    """
+
+                # Rendu combiné
+                st.markdown(css_style + html_content, unsafe_allow_html=True)
+
+            # 2. TAB LOGIQUE (Visuelle & Détaillée)
+            with t_detail:
+                # ATTENTION : La chaîne HTML ci-dessous est volontairement collée à gauche.
+                # Ne rajoutez PAS d'espaces devant les balises <div>, sinon le rendu plantera.
+                html_guide_content = """
+<div style="font-family: sans-serif; color: #333;">
+    <div style="margin-bottom: 20px; padding: 15px; background: #e8f0fe; border-left: 5px solid #1a73e8; border-radius: 4px;">
+        <h4 style="color: #1a73e8; margin: 0 0 5px 0;">🧮 Principe de Calcul</h4>
+        <p style="margin: 0; font-size: 14px; line-height: 1.5;">
+            Le GeoScore est un indice de performance sur <b>100 points</b>. <br>
+            Il additionne deux forces positives (le marché) et soustrait les risques d'un capital résilience initial.
+        </p>
+    </div>
+    <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 280px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+            <div style="background: #f1f8e9; padding: 10px 15px; border-bottom: 1px solid #c5e1a5;">
+                <h5 style="margin: 0; color: #2e7d32; font-size: 15px;">📈 1. Potentiel (40 pts)</h5>
+            </div>
+            <div style="padding: 15px; font-size: 13px;">
+                <p style="margin-top:0;"><b>Objectif :</b> Mesurer la profondeur du marché.</p>
+                <ul style="padding-left: 20px; margin-bottom: 0; color: #555;">
+                    <li style="margin-bottom: 8px;"><b>Densité (20 pts) :</b> Note proportionnelle à la densité brute.<br>
+                        <span style="color: #888; font-size: 12px;">➔ 20/20 si > 4 000 hab/km².</span>
+                    </li>
+                    <li><b>Revenus (20 pts) :</b> Note proportionnelle au niveau de vie.<br>
+                        <span style="color: #888; font-size: 12px;">➔ 20/20 si > 30 000 €/an.</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+        <div style="flex: 1; min-width: 280px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+            <div style="background: #fff8e1; padding: 10px 15px; border-bottom: 1px solid #ffe082;">
+                <h5 style="margin: 0; color: #f9a825; font-size: 15px;">🚀 2. Dynamisme (30 pts)</h5>
+            </div>
+            <div style="padding: 15px; font-size: 13px;">
+                <p style="margin-top:0;"><b>Objectif :</b> Valider la liquidité de l'actif.</p>
+                <ul style="padding-left: 20px; margin-bottom: 0; color: #555;">
+                    <li><b>Transactions (30 pts) :</b> Basé sur le volume de ventes DVF (2 ans).<br>
+                        <span style="color: #888; font-size: 12px;">➔ 30/30 si > 15 ventes/km².</span>
+                    </li>
+                </ul>
+                <div style="margin-top: 15px; padding: 8px; background: #fff; border: 1px dashed #ddd; border-radius: 4px; font-size: 12px; color: #666;">
+                    <i>💡 Un marché liquide réduit le risque de vacance et facilite la revente.</i>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div style="margin-top: 15px; border: 1px solid #ffcdd2; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+        <div style="background: #ffebee; padding: 10px 15px; border-bottom: 1px solid #ef9a9a;">
+            <h5 style="margin: 0; color: #c62828; font-size: 15px;">🛡️ 3. Résilience & Risques (Capital 30 pts)</h5>
+        </div>
+        <div style="padding: 15px; font-size: 13px;">
+            <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 200px;">
+                    <p style="margin-top: 0; font-weight: bold; color: #333;">Mécanisme de Malus Pondéré :</p>
+                    <p style="color: #555;">Vous débutez avec <b>30/30</b>. Chaque m² exposé à un aléa réduit ce score proportionnellement à sa surface.</p>
+                </div>
+                <div style="flex: 1; min-width: 180px; background: #fff; padding: 10px; border-radius: 6px; border: 1px solid #f0f0f0;">
+                    <strong style="color: #0d47a1; display: block; margin-bottom: 5px;">🌊 Inondation (Max -20)</strong>
+                    <table style="width: 100%; font-size: 12px; color: #555;">
+                        <tr><td>Fort</td><td style="text-align: right; color: #d32f2f; font-weight: bold;">-20 pts</td></tr>
+                        <tr><td>Moyen</td><td style="text-align: right; color: #f57c00; font-weight: bold;">-10 pts</td></tr>
+                        <tr><td>Faible</td><td style="text-align: right; color: #fbc02d; font-weight: bold;">-5 pts</td></tr>
+                    </table>
+                </div>
+                <div style="flex: 1; min-width: 180px; background: #fff; padding: 10px; border-radius: 6px; border: 1px solid #f0f0f0;">
+                    <strong style="color: #e65100; display: block; margin-bottom: 5px;">☀️ Sécheresse (Max -15)</strong>
+                    <table style="width: 100%; font-size: 12px; color: #555;">
+                        <tr><td>Fort</td><td style="text-align: right; color: #d32f2f; font-weight: bold;">-15 pts</td></tr>
+                        <tr><td>Moyen</td><td style="text-align: right; color: #f57c00; font-weight: bold;">-8 pts</td></tr>
+                        <tr><td>Faible</td><td style="text-align: right; color: #fbc02d; font-weight: bold;">-3 pts</td></tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+"""
+                st.markdown(html_guide_content, unsafe_allow_html=True)
 st.markdown("---")
 
 # 2. CARTE INTERACTIVE
@@ -560,11 +631,12 @@ tab_pop, tab_immo, tab_loco, tab_tech = st.tabs([
 ])
 
 # --- ONGLET 🧬 Environnement (Socio / Radar / Top Concurrence) ---
+# --- ONGLET 🧬 Environnement (Socio / Radar / Top Concurrence) ---
 with tab_pop:
     st.subheader("Profil Socio-Démographique & Concurrence Locale")
 
     if is_polygonal and 'IRIS' in dict_geo:
-        # Bloc Radar (Inchangé)
+        # --- 1. RADAR (INCHANGÉ) ---
         st.markdown("##### 📡 Radar de Positionnement")
         c_conf, _ = st.columns([2, 3])
         with c_conf:
@@ -580,108 +652,240 @@ with tab_pop:
         except Exception:
             st.error("Erreur de rendu du Radar Plotly.")
 
+        # --- 2. CONTEXTE BUSINESS (NOUVELLE VERSION FORMATÉE) ---
         st.markdown("---")
-        st.markdown("##### 🏢 Contexte Business")
+        st.subheader("🏢 Contexte Business & Concurrence")
 
-        c_age, c_top = st.columns(2)
+        if naf_ref:
+            # Récupération du libellé d'activité (Sécurisé)
+            libelle_act = valeur_data.get('denominationunitelegale', "Activité Similaire")
+            # Si le libellé est le nom de l'entreprise, on essaie de trouver le libellé NAF, sinon on laisse vide
+            sous_titre_naf = f"Code : {naf_ref}"
 
-        # 1. Âge Moyen (Indicateur de maturité du marché)
-        with c_age:
-            if age_stats:
-                st.metric("⏳ Âge Moyen des Établissements", f"{age_stats['age_moyen']} ans",
-                          help=f"Médiane : {age_stats['age_median']} ans")
-                st.caption(f"Total : {age_stats['count']} entreprises.")
-            else:
-                st.info(
-                    "Sélectionnez un **SIRET** pour déterminer l'âge moyen des entreprises similaires dans la zone.")
+            # --- CALCULS ---
+            age_moyen_str = "N/A"
+            nb_total_concs = 0
+            df_concurrents = pd.DataFrame()
 
-        # 2. Top 3 Concurrence Locale
-        with c_top:
-            if naf_ref and dep_ref_code and engine:
-                st.markdown("###### Top 3 Concurrents (NAF Similaire)")
-
-                # 🚨 CRITIQUE : REQUÊTE CONCURRENCE LOCALE (Réutilisé de P01)
-                # On filtre dans la base complète, puis on filtre spatialement sur geom_zone
-                df_conc_full = get_concurrents_sql(engine, naf_ref, dep_ref_code,
-                                                   siret_exclu='0')
+            try:
+                # Requête SQL directe pour avoir les données fraîches
+                df_conc_full = get_concurrents_sql(engine, naf_ref, dep_ref_code, siret_exclu='0')
 
                 if not df_conc_full.empty:
+                    # Filtre spatial strict (Geopandas)
                     gdf_conc_full = transfo_geodataframe(df_conc_full, 'longitude', 'latitude')
-                    # Filtre spatial sur la zone d'étude
-                    gdf_conc_local = gdf_conc_full[gdf_conc_full.within(geom_zone)]
+                    gdf_concurrents = gdf_conc_full[gdf_conc_full.within(geom_zone)].copy()
+                    nb_total_concs = len(gdf_concurrents)
 
-                    if not gdf_conc_local.empty:
-                        # Calcul de la distance au point central pour le Top N
-                        ref_point = Point(final_lon, final_lat)
-                        gdf_conc_local['distance'] = gdf_conc_local.geometry.apply(
-                            lambda g: g.distance(ref_point) * 111.32 * 1000)
+                    if nb_total_concs > 0:
+                        df_concurrents = gdf_concurrents
 
-                        top_3 = gdf_conc_local.sort_values('distance').head(3)
+                        # Calcul Âge Moyen
+                        col_date = next((c for c in df_concurrents.columns if c.lower() == 'datecreationetablissement'),
+                                        None)
+                        if col_date:
+                            now = pd.Timestamp.now()
+                            df_concurrents[col_date] = pd.to_datetime(df_concurrents[col_date], errors='coerce')
+                            df_concurrents['Age'] = (now - df_concurrents[col_date]).dt.days / 365.25
+                            val_age = df_concurrents['Age'].mean()
+                            age_moyen_str = f"{val_age:.1f} ans"
 
-                        st.dataframe(top_3[['denominationunitelegale', 'distance']].rename(
-                            columns={'denominationunitelegale': 'Nom', 'distance': 'Distance (m)'}), hide_index=True)
-                        st.caption(f"Basé sur NAF {naf_ref} dans la zone.")
-                    else:
-                        st.warning(f"Aucun concurrent du NAF {naf_ref} trouvé dans la zone d'étude.")
-                else:
-                    st.warning(f"Aucun concurrent du NAF {naf_ref} trouvé dans le département {dep_ref_code}.")
+                        # Calcul Distances
+                        df_concurrents = df_concurrents.to_crs("EPSG:2154")
+                        point_clic_proj = \
+                        gpd.GeoSeries([Point(final_lon, final_lat)], crs="EPSG:4326").to_crs("EPSG:2154").iloc[0]
+                        df_concurrents['dist_m'] = df_concurrents.geometry.distance(point_clic_proj)
+                        df_concurrents = df_concurrents.sort_values('dist_m')
+
+            except Exception:
+                pass
+
+            # --- AFFICHAGE "CARTES" (HTML) AU LIEU DE METRIC (POUR ÉVITER LES "...") ---
+            k1, k2, k3 = st.columns(3)
+
+
+            # Fonction pour générer une carte KPI propre
+            def kpi_card(titre, valeur, sous_titre, couleur_bord="#ddd"):
+                return f"""
+                <div style="background-color:white; border:1px solid {couleur_bord}; border-radius:8px; padding:15px; text-align:center; height:100%; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                    <div style="color:#666; font-size:12px; font-weight:bold; text-transform:uppercase; margin-bottom:5px;">{titre}</div>
+                    <div style="color:#333; font-size:20px; font-weight:bold; margin-bottom:5px;">{valeur}</div>
+                    <div style="color:#888; font-size:11px; line-height:1.2;">{sous_titre}</div>
+                </div>
+                """
+
+
+            with k1:
+                st.markdown(kpi_card("🎯 Cible Analysée", f"NAF {naf_ref}", "Filtre Activité Principale", "#4A90E2"),
+                            unsafe_allow_html=True)
+            with k2:
+                st.markdown(
+                    kpi_card("🏪 Densité Locale", f"{nb_total_concs} Établ.", "Concurrents dans la zone", "#50E3C2"),
+                    unsafe_allow_html=True)
+            with k3:
+                st.markdown(kpi_card("⏳ Pérennité", age_moyen_str, "Ancienneté Moyenne", "#F5A623"),
+                            unsafe_allow_html=True)
+
+            st.write("")  # Petit espace
+
+            # --- LISTE DES VOISINS ---
+            st.markdown("##### 📍 Les 3 Voisins les plus proches (Même activité)")
+
+            if not df_concurrents.empty:
+                top_3 = df_concurrents.head(3)
+                cols = st.columns(3)
+                for idx, (index, row) in enumerate(top_3.iterrows()):
+                    with cols[idx]:
+                        dist_val = row['dist_m']
+                        if dist_val < 5:
+                            dist_txt = "📍 C'est ici (0 m)"
+                            badge_bg = "#28a745"
+                        elif dist_val < 1000:
+                            dist_txt = f"📏 {dist_val:.0f} m"
+                            badge_bg = "#6c757d"
+                        else:
+                            dist_txt = f"🚗 {dist_val / 1000:.1f} km"
+                            badge_bg = "#007bff"
+
+                        nom_ent = row.get('denominationunitelegale', row.get('Denomination', 'Nom inconnu'))
+                        if pd.isna(nom_ent): nom_ent = "Nom Non Communiqué"
+                        siret_ent = row.get('siret', row.get('Siret', 'N/A'))
+
+                        st.markdown(f"""
+                        <div style="border:1px solid #eee; border-radius:8px; padding:12px; background-color:#fcfcfc; height:100%;">
+                            <div style="font-weight:bold; font-size:13px; color:#333; margin-bottom:4px; line-height:1.4;">
+                                {nom_ent}
+                            </div>
+                            <div style="font-size:11px; color:#999; margin-bottom:8px;">SIRET : {siret_ent}</div>
+                            <span style="background-color:{badge_bg}; color:white; padding:4px 8px; border-radius:12px; font-size:10px; font-weight:bold;">
+                                {dist_txt}
+                            </span>
+                        </div>
+                        """, unsafe_allow_html=True)
             else:
-                st.warning(
-                    "Le Top 3 des concurrents nécessite la saisie d'un **SIRET** pour identifier le NAF de référence.")
+                st.info("Aucun concurrent direct détecté dans cette zone.")
+
+            st.caption(
+                "ℹ️ *Analyse basée uniquement sur les entreprises présentes à l'intérieur de la géométrie dessinée.*")
+
+        else:
+            # Cas où on n'a pas sélectionné via SIRET
+            if target.get("source") != "SIREN/SIRET":
+                st.info(
+                    "💡 L'analyse concurrentielle nécessite de sélectionner un point via son SIRET (Barre latérale).")
+            else:
+                st.warning("Code NAF non détecté pour cet établissement.")
 
     else:
-        st.info("Sélectionnez une zone (Isochrone ou Cercle) pour l'analyse démographique.")
+        st.info("Sélectionnez une zone (Isochrone ou Cercle) pour l'analyse.")
 
 # --- ONGLET 💰 Immobilier (DVF) ---
 with tab_immo:
     st.subheader("Dynamique Immobilière & Tendance de Prix")
 
     if not df_dvf_local.empty:
-        # CRITIQUE : Filtre sur 2 ans (pour les KPIs)
-        df_2ans = df_dvf_local[df_dvf_local['date_mutation'] >= pd.Timestamp.now() - pd.DateOffset(years=2)]
 
-        # Vérification si le filtre 2 ans est vide
-        if df_2ans.empty:
-            st.warning("Aucune transaction trouvée sur les 2 dernières années dans cette zone pour calculer les KPIs.")
-            nb_transactions, prix_m2_moyen, prix_total_moyen = 0, 0, 0
-        else:
-            nb_transactions = len(df_2ans)
-            prix_total_moyen = df_2ans['valeur_fonciere'].mean()
-            prix_m2_moyen = df_2ans['prix_m2'].mean()
+        # --- 1. FILTRE GLOBAL (KPIs + GRAPHIQUE) ---
+        # On définit les options intelligentes
+        types_dispos = sorted(df_dvf_local['type_local'].dropna().unique().tolist())
+        options_filtre = ["Tous", "Résidentiel", "Commercial"]
+        # On ajoute les types spécifiques s'ils ne sont pas déjà couverts par les catégories macro
+        options_filtre += [t for t in types_dispos if
+                           t not in ["Maison", "Appartement", "Local industriel. commercial ou assimilé"]]
 
-        c_kpi1, c_kpi2, c_kpi3 = st.columns(3)
-        c_kpi1.metric("Transactions (2 ans)", nb_transactions)
-        c_kpi2.metric("Prix m² Moyen", f"{prix_m2_moyen:,.0f} €")
-        c_kpi3.metric("Prix Total Moyen", f"{prix_total_moyen:,.0f} €")
-
-        st.caption("Les KPIs sont basés sur les 2 dernières années de transactions.")
-        st.markdown("---")
-
-        st.markdown("##### 📈 Tendance de Prix (5 ans)")
-        # CRITIQUE : Filtre par type de local (Maison/Appart/Local)
-        type_local_filtre = st.selectbox(
-            "Filtrer par type de local :",
-            ["Tous"] + df_dvf_local['type_local'].dropna().unique().tolist(),
-            key="dvf_local_filter_chart"
+        filtre_immo = st.selectbox(
+            "🔎 Filtrer l'analyse par type de bien :",
+            options_filtre,
+            index=0,
+            key="dvf_global_filter"
         )
 
-        try:
-            fig_dvf = plot_evolution_prix_dvf(df_dvf_local, type_local_filtre)
-            st.plotly_chart(fig_dvf, use_container_width=True)
-        except Exception as e:
-            st.error(f"Erreur de rendu du graphique DVF : {e}. Vérifiez la présence de données filtrées sur 5 ans.")
+        # --- 2. APPLICATION DU FILTRE (CENTRALISÉE) ---
+        # On filtre le DataFrame UNE SEULE FOIS pour tout l'onglet
+        df_filtered = df_dvf_local.copy()
+
+        if filtre_immo == "Résidentiel":
+            df_filtered = df_filtered[df_filtered['type_local'].isin(['Maison', 'Appartement'])]
+        elif filtre_immo == "Commercial":
+            df_filtered = df_filtered[df_filtered['type_local'].str.contains('Local', case=False, na=False)]
+        elif filtre_immo != "Tous":
+            df_filtered = df_filtered[df_filtered['type_local'] == filtre_immo]
+
+        # --- 3. CALCUL DES KPIS (SUR DONNÉES FILTRÉES - 2 ANS) ---
+        # On prend les 2 dernières années par rapport à aujourd'hui
+        date_ref_kpi = pd.Timestamp.now() - pd.DateOffset(years=2)
+        df_kpi_2ans = df_filtered[df_filtered['date_mutation'] >= date_ref_kpi]
+
+        if df_kpi_2ans.empty:
+            st.info(f"ℹ️ Aucune transaction '{filtre_immo}' recensée sur les 2 dernières années.")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Transactions (2 ans)", "0")
+            c2.metric("Prix m² Moyen", "-")
+            c3.metric("Prix Total Moyen", "-")
+        else:
+            nb_transac = len(df_kpi_2ans)
+            px_m2 = df_kpi_2ans['prix_m2'].mean()
+            px_tot = df_kpi_2ans['valeur_fonciere'].mean()
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Transactions (2 ans)", nb_transac)
+            c2.metric("Prix m² Moyen", f"{px_m2:,.0f} €")
+            c3.metric("Prix Total Moyen", f"{px_tot:,.0f} €")
+
+        st.markdown("---")
+
+        # --- 4. GRAPHIQUE INTELLIGENT (Business Rule) ---
+        st.markdown(f"##### 📈 Tendance de Prix - {filtre_immo} (5 ans)")
+
+        # Seuil de significativité statistique (ex: 10 ventes sur 5 ans min pour faire un graphe)
+        MIN_VENTES_POUR_GRAPHE = 10
+        vol_total_hist = len(df_filtered)
+
+        if vol_total_hist < MIN_VENTES_POUR_GRAPHE:
+            # Cas : Pas assez de données -> Message Propre
+            st.warning(
+                f"⚠️ **Données insuffisantes pour dégager une tendance fiable.**\n\n"
+                f"Il n'y a eu que **{vol_total_hist} vente(s)** de type '{filtre_immo}' sur la zone historique.\n"
+                f"Un minimum de **{MIN_VENTES_POUR_GRAPHE} transactions** est requis pour générer une courbe pertinente."
+            )
+        else:
+            # Cas : Données suffisantes -> Affichage Graphique
+            try:
+                # Astuce : On passe "Tous" à la fonction de chart car on lui donne déjà un DF filtré (df_filtered)
+                # Cela évite que la fonction chart refasse un filtrage strict qui pourrait casser le "Commercial"
+                fig_dvf = plot_evolution_prix_dvf(df_filtered, "Tous")
+
+                if fig_dvf:
+                    # On personnalise le titre pour refléter le filtre actuel
+                    fig_dvf.update_layout(title=f"Évolution {filtre_immo} (Volume & Prix)")
+                    st.plotly_chart(fig_dvf, use_container_width=True)
+                else:
+                    st.warning("Impossible de générer le graphique.")
+            except Exception as e:
+                st.error(f"Erreur technique graphique : {e}")
+
+        st.markdown("---")
+
+        # --- 5. CONTRÔLES CARTE (Fix Session State conservé) ---
+        st.markdown("##### 🗺️ Options de la Carte (DVF)")
+
+        c_check, c_visu, c_type = st.columns([1, 2, 2])
+
+        with c_check:
+            st.write("")
+            st.write("")
+            st.toggle("Afficher Calque", key="afficher_dvf")
+
+        with c_visu:
+            st.radio("Style", ["Points", "Heatmap"], horizontal=True, key="mode_visu_map")
+
+        with c_type:
+            # Ce filtre reste indépendant pour la carte (car on peut vouloir voir le résidentiel
+            # sur la carte tout en analysant le commercial sur les graphiques)
+            st.radio("Filtre Carte", ["Tous", "Résidentiel", "Commercial"], horizontal=True, key="dvf_type_map")
+
     else:
-        st.info("Aucune transaction DVF récente trouvée dans la zone proche.")
-
-    st.markdown("---")
-    st.markdown("##### Paramètres d'Affichage de la Carte (DVF)")
-
-    st.session_state.afficher_dvf = st.toggle("Afficher DVF sur la carte", value=st.session_state.afficher_dvf)
-    c_dvf_map, c_dvf_type = st.columns(2)
-    st.session_state.mode_visu_map = c_dvf_map.radio("Mode Visualisation", ["Points", "Heatmap"], horizontal=True,
-                                                     key="dvf_visu_mode")
-    st.session_state.dvf_type_map = c_dvf_type.radio("Type Transactions (Carte)", ["Tous", "Résidentiel", "Commercial"],
-                                                     horizontal=True, key="dvf_type_filtre_map")
+        st.info("Aucune donnée DVF brute disponible dans le périmètre géographique sélectionné.")
 
 # --- ONGLET 🚦 Générateurs de Trafic (Locomotives) ---
 with tab_loco:
@@ -799,6 +1003,12 @@ with tab_tech:
                 st.markdown("**RCP 8.5 (Pessimiste)**")
                 st.metric("🌡️ Jours Canicule", f"+{projections['RCP 8.5']['Jours Canicule']} j/an")
                 st.metric("🌙 Nuits Tropicales", f"+{projections['RCP 8.5']['Nuits Tropicales']} j/an")
+
+            # --- AJOUT DE LA NOTE DE LECTURE (SEULE MODIFICATION) ---
+            st.info(
+                "ℹ️ **Note de lecture :** À l'horizon 2050 (court terme climatique), les scénarios RCP 4.5 et 8.5 ne divergent pas encore fortement. "
+                "Il est normal d'observer localement des valeurs très proches, voire ponctuellement supérieures pour le scénario modéré, en raison de la variabilité naturelle des modèles."
+            )
 
         except Exception:
             st.warning("Projections DRIAS/Climat 2050 non disponibles ou erreur de calcul pour ce point.")
