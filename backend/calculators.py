@@ -104,61 +104,100 @@ def generer_avis_synthetique(note_globale, malus_inond_pondere):
 
 
 def _calculer_score_attractivite(pop_zone, revenu_zone, nb_ventes_immo,
-                                 niveau_inond_max, ratio_surf_inond,
-                                 niveau_rga_max, ratio_surf_rga,
+                                 stats_inond, stats_rga,
                                  taux_cannib, surface_km2):
     """
-    Calcule le GeoScore avec pondération surfacique des risques.
+    Calcule le GeoScore avec Malus Pondéré (Répartition précise des risques).
+    stats_inond = {'Fort': 0.2, 'Moyen': 0.1, 'Faible': 0.0, 'Aucun': 0.7}
     """
     score = 0
     surface_km2 = max(surface_km2, 0.1)
 
+    # --- 1. POTENTIEL (40 pts) ---
     densite_pop = pop_zone / surface_km2
-    densite_ventes = nb_ventes_immo / surface_km2
+    CIBLE_DENSITE = 4000
+    score_densite = min(densite_pop / CIBLE_DENSITE, 1.0) * 20
 
-    # 1. POTENTIEL (40 pts)
-    s_densite = min(densite_pop / 2500, 1) * 20
-    s_revenu = min(revenu_zone / 28000, 1) * 20 if revenu_zone else 10
-    part_potentiel = s_densite + s_revenu
+    CIBLE_REVENU = 30000
+    if revenu_zone and revenu_zone > 0:
+        score_revenu = min(revenu_zone / CIBLE_REVENU, 1.0) * 20
+    else:
+        score_revenu = 10
+
+    part_potentiel = score_densite + score_revenu
     score += part_potentiel
 
-    # 2. DYNAMISME (30 pts)
-    s_immo = min(densite_ventes / 10, 1) * 30
-    part_dynamisme = s_immo
+    # --- 2. DYNAMISME (30 pts) ---
+    densite_ventes = nb_ventes_immo / surface_km2
+    CIBLE_VENTES = 15
+    score_immo = min(densite_ventes / CIBLE_VENTES, 1.0) * 30
+
+    part_dynamisme = score_immo
     score += part_dynamisme
 
-    # 3. RÉSILIENCE CLIMATIQUE (30 pts - Pondérée par la surface)
-    base_malus_i = 20 if niveau_inond_max == 3 else 10 if niveau_inond_max == 2 else 5 if niveau_inond_max == 1 else 0
-    base_malus_r = 10 if niveau_rga_max == 3 else 5 if niveau_rga_max == 2 else 2 if niveau_rga_max == 1 else 0
+    # --- 3. RÉSILIENCE (30 pts - Calcul Pondéré) ---
 
-    malus_i_effectif = base_malus_i * ratio_surf_inond
-    malus_r_effectif = base_malus_r * ratio_surf_rga
+    # Barème Inondation (Max 20 pts)
+    # Fort = 20pts, Moyen = 10pts, Faible = 5pts
+    malus_i_effectif = (stats_inond.get('Fort', 0) * 20) + \
+                       (stats_inond.get('Moyen', 0) * 10) + \
+                       (stats_inond.get('Faible', 0) * 5)
+
+    # Barème Sécheresse (Max 15 pts)
+    # Fort = 15pts, Moyen = 8pts, Faible = 3pts
+    malus_r_effectif = (stats_rga.get('Fort', 0) * 15) + \
+                       (stats_rga.get('Moyen', 0) * 8) + \
+                       (stats_rga.get('Faible', 0) * 3)
 
     part_resilience = max(0, 30 - malus_i_effectif - malus_r_effectif)
     score += part_resilience
 
-    # Malus Externe : Saturation
+    # --- 4. MALUS EXTERNE ---
     malus_c = 0
     if taux_cannib > 10:
         malus_c = min((taux_cannib - 10) * 1.5, 30)
 
     score_final = max(0, score - malus_c)
 
-    # --- FORMATAGE TEXTUEL INTELLIGENT ---
-    # Ceci est la structure de retour utilisée dans la page 02 pour l'expander de décomposition
+    # --- FORMATAGE DE L'AFFICHAGE (TEXTE INTELLIGENT) ---
+    def format_risk_dist(stats):
+        """Crée une string type '20% Fort, 30% Moy.'"""
+        parts_txt = []
+        if stats['Fort'] > 0.01: parts_txt.append(f"{stats['Fort']:.0%} Fort")
+        if stats['Moyen'] > 0.01: parts_txt.append(f"{stats['Moyen']:.0%} Moy.")
+        if stats['Faible'] > 0.01: parts_txt.append(f"{stats['Faible']:.0%} Faible")
+        if not parts_txt: return "Aucun risque"
+        return ", ".join(parts_txt)
+
     explications = {
-        "Densité Pop": f"{int(densite_pop)} hab/km²",
-        "Revenu Médian": f"{int(revenu_zone)} €",
-        "Densité Ventes (2 ans)": f"{densite_ventes:.1f} act./km²",
-        "Malus Inondation": f"-{malus_i_effectif:.1f} pts",
-        "Malus Sécheresse": f"-{malus_r_effectif:.1f} pts",
-        "Malus Saturation": f"-{int(malus_c)} pts"
+        "Densité": {
+            "val": f"{int(densite_pop)} hab/km²", "note": f"{score_densite:.1f} / 20", "cible": f"> {CIBLE_DENSITE}"
+        },
+        "Revenus": {
+            "val": f"{int(revenu_zone)} €", "note": f"{score_revenu:.1f} / 20", "cible": f"> {CIBLE_REVENU} €"
+        },
+        "Ventes": {
+            "val": f"{densite_ventes:.1f} /km²", "note": f"{score_immo:.1f} / 30", "cible": f"> {CIBLE_VENTES}"
+        },
+        "Inondation": {
+            "val": format_risk_dist(stats_inond),
+            "malus": f"-{malus_i_effectif:.1f} pts"
+        },
+        "Secheresse": {
+            "val": format_risk_dist(stats_rga),
+            "malus": f"-{malus_r_effectif:.1f} pts"
+        },
+        "Saturation": {
+            "val": f"{taux_cannib:.1f}%", "malus": f"-{malus_c:.1f} pts"
+        }
     }
 
-    parts = {"Potentiel": round(part_potentiel, 1), "Dynamisme": round(part_dynamisme, 1),
-             "Résilience": round(part_resilience, 1)}
+    parts = {
+        "Potentiel": round(part_potentiel, 1),
+        "Dynamisme": round(part_dynamisme, 1),
+        "Résilience": round(part_resilience, 1)
+    }
 
-    # Simplification du retour pour la page 02
     return int(score_final), parts, malus_c, malus_i_effectif, malus_r_effectif, explications
 
 
@@ -275,22 +314,37 @@ def calculer_score_cannibalisation_isochrone(zone_cible_geom, gdf_reseau_existan
 
 # --- Conserve la fonction simple pour les autres besoins ---
 def calculer_cannibalisation(zone_analysee_geom, gdf_reseau_existant, buffer_m=2000):
-    """Calcule le % de recouvrement entre la zone et le réseau existant (Buffer simple)."""
+    """
+    Calcule le % de recouvrement entre la zone et le réseau existant.
+    Retourne : (Taux en %, GeoDataFrame de l'intersection pour visualisation)
+    """
     if zone_analysee_geom is None or gdf_reseau_existant.empty:
-        return 0
+        return 0.0, gpd.GeoDataFrame()
 
     try:
+        # Création du buffer réseau
         gdf_res_buff = gdf_reseau_existant.to_crs("EPSG:2154").buffer(buffer_m).unary_union
+
+        # Conversion zone analyse
         gdf_zone = gpd.GeoDataFrame({'geometry': [zone_analysee_geom]}, crs="EPSG:4326").to_crs("EPSG:2154")
         area_total = gdf_zone.area.iloc[0]
 
+        # Intersection
         intersection = gdf_zone.intersection(gdf_res_buff)
-        if intersection.is_empty.all(): return 0
 
-        return (intersection.area.iloc[0] / area_total * 100)
-    except Exception:
-        return 0
+        if intersection.is_empty.all():
+            return 0.0, gpd.GeoDataFrame()
 
+        taux = (intersection.area.iloc[0] / area_total * 100)
+
+        # Création du GDF de visualisation (retour en WGS84 pour Folium)
+        gdf_visu = gpd.GeoDataFrame(geometry=[intersection.iloc[0]], crs="EPSG:2154").to_crs("EPSG:4326")
+
+        return taux, gdf_visu
+
+    except Exception as e:
+        print(f"Erreur Cannibalisation: {e}")
+        return 0.0, gpd.GeoDataFrame()
 
 # --- NOUVEAU : Logique Locomotives (Générateurs de Trafic) ---
 def analyser_locomotives(zone_geom):
@@ -460,7 +514,7 @@ def recuperer_climat_plus_proche(lat_cible, lon_cible, df_climat):
 # =============================================================================
 
 @st.cache_data(show_spinner="Enrichissement...")
-def enrichir_dataframe_siren(_engine, df, col_id, type_id, only_siege=True):
+def enrichir_dataframe_siren(_engine, df, col_id, type_id, only_siege=False):
     """Traite un fichier CSV d'identifiants et récupère les infos BDD."""
     if not _engine or df.empty:
         return df, pd.DataFrame(), pd.DataFrame()
@@ -485,11 +539,18 @@ def enrichir_dataframe_siren(_engine, df, col_id, type_id, only_siege=True):
 
     # Requête SQL de masse
     col_sql = "siret" if type_id == "siret" else "siren"
-    siege_sql = "AND etablissementsiege = True" if (type_id == "siren" and only_siege) else ""
 
+    # MODIFICATION ICI : On force only_siege à False si on veut tout récupérer
+    # Si vous voulez garder le paramètre only_siege actif, laissez la ligne telle quelle.
+    # Pour avoir TOUS les établissements par défaut en mode SIREN :
+    siege_sql = ""  # On vide cette variable pour ne pas filtrer sur le siège
+
+    # MODIFICATION SELECT : On ajoute explicitement 'siret' pour l'avoir dans le résultat final
     q = text(f"""
         SELECT 
-            {col_sql} as join_key, denominationunitelegale, adresse, 
+            {col_sql} as join_key, 
+            siret, 
+            denominationunitelegale, adresse, 
             latitude, longitude, activiteprincipaleetablissement, nom_dep
         FROM etablissements 
         WHERE {col_sql} IN :ids {siege_sql}
@@ -504,10 +565,13 @@ def enrichir_dataframe_siren(_engine, df, col_id, type_id, only_siege=True):
 
         df_res = pd.concat(results) if results else pd.DataFrame()
 
-    except Exception:
+    except Exception as e:
+        # J'ajoute un print pour vous aider à débugger si le nom de table est faux
+        print(f"Erreur SQL : {e}")
         return pd.DataFrame(), df_valid, df_rejet
 
     # Fusion
+    # Le merge va automatiquement dupliquer les lignes d'entrée si un SIREN a plusieurs SIRETs en face
     merged = df_valid.merge(df_res, left_on=clean_col, right_on='join_key', how='left')
 
     found = merged[merged['join_key'].notnull()]

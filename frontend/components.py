@@ -184,7 +184,7 @@ def sidebar_filtres_reseau():
     source_reseau = "Base de Données (SIRENE)"  # Par défaut
 
     if mode_cannibale:
-        st.markdown("### 4. 📉 Cannibalisation / Réseau")
+        st.markdown("### Cannibalisation / Réseau")
 
         source_reseau = st.radio("Source des points de vente :",
                                  ["Base de Données (SIRENE)", "Fichier Client (CSV/Excel)"],
@@ -241,7 +241,7 @@ def selection_point_central(engine):
 
     source_choix = st.radio(
         "Source d'identification:",
-        ["Adresse", "Coordonnées", "SIREN/SIRET"],
+        ["Adresse", "Coordonnées", "SIRET"],
         horizontal=True,
         key="poi_source_choix",
         label_visibility="collapsed",

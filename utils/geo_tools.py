@@ -163,68 +163,78 @@ def get_stats_sinistralite(df_catnat):
 @st.cache_data
 def projeter_climat_2050(target_lat, target_lon):
     """
-    Trouve le point météo le plus proche via un calcul de distance vectoriel.
-    Version Corrigée V2 : Force le typage numérique et élargit la recherche.
+    Trouve le point météo le plus proche et renvoie les données.
+    VERSION DIAGNOSTIC : Affiche les erreurs si les données sont à 0.
     """
     # 1. Chargement
     df_clim = charger_moteur_climat()
 
-    # Définition des données par défaut (Vides)
+    # Valeurs par défaut (Vides)
     zero_data = {"Jours Canicule": 0, "Nuits Tropicales": 0, "Sécheresse Sol": 0, "Pluie Extrême": 0}
+    empty_result = {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
 
+    # DIAGNOSTIC 1 : Fichier chargé ?
     if df_clim is None or df_clim.empty:
-        return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
+        st.warning("⚠️ Moteur Climat : Le fichier Parquet est vide ou introuvable.")
+        return empty_result
 
-    # 2. Nettoyage & Sécurisation des types (CRITIQUE POUR LE BUG +0)
+    # 2. Nettoyage & Sécurisation
     try:
-        # On s'assure que les coordonnées sont bien des nombres (et pas des strings "43.5")
         df_clim['lat_round'] = pd.to_numeric(df_clim['lat_round'], errors='coerce')
         df_clim['lon_round'] = pd.to_numeric(df_clim['lon_round'], errors='coerce')
-
-        # On vire les lignes illisibles
         df_clim = df_clim.dropna(subset=['lat_round', 'lon_round'])
-
-        if df_clim.empty:
-            return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
-
     except KeyError:
-        # Si les colonnes n'existent pas du tout
-        return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
+        st.error(
+            f"⚠️ Moteur Climat : Colonnes lat_round/lon_round introuvables. Colonnes dispo : {df_clim.columns.tolist()}")
+        return empty_result
 
     # 3. Calcul de distance (Nearest Neighbor)
-    # Distance euclidienne au carré (suffisant et rapide)
-    # target_lat/lon doivent aussi être des floats
-    t_lat = float(target_lat)
-    t_lon = float(target_lon)
-
+    t_lat, t_lon = float(target_lat), float(target_lon)
     distances = (df_clim['lat_round'] - t_lat) ** 2 + (df_clim['lon_round'] - t_lon) ** 2
 
-    # 4. Identification du gagnant
+    # 4. Vérification de la distance
     idx_min = distances.idxmin()
     min_dist_sq = distances.min()
 
-    # Seuil de sécurité : 0.25 degré² ~= 0.5 degré linéaire ~= 55 km
-    # On accepte d'aller chercher un peu loin si nécessaire
+    # Seuil : ~50km
     if min_dist_sq > 0.25:
-        return {"RCP 4.5": zero_data, "RCP 8.5": zero_data}
+        st.warning(
+            f"⚠️ Moteur Climat : Aucune donnée trouvée à proximité (Distance > 50km). Point le plus proche trouvé à {min_dist_sq:.2f} degrés².")
+        return empty_result
 
-    # 5. Extraction des données
+    # 5. Extraction des données (Avec vérification des colonnes)
     row = df_clim.loc[idx_min]
 
-    return {
-        "RCP 4.5": {
-            "Jours Canicule": int(row.get("RCP45_Jours Canicule", 0)),
-            "Nuits Tropicales": int(row.get("RCP45_Nuits Tropicales", 0)),
-            "Sécheresse Sol": int(row.get("RCP45_Sécheresse Sol", 0)),
-            "Pluie Extrême": int(row.get("RCP45_Pluie Extrême", 0))
-        },
-        "RCP 8.5": {
-            "Jours Canicule": int(row.get("RCP85_Jours Canicule", 0)),
-            "Nuits Tropicales": int(row.get("RCP85_Nuits Tropicales", 0)),
-            "Sécheresse Sol": int(row.get("RCP85_Sécheresse Sol", 0)),
-            "Pluie Extrême": int(row.get("RCP85_Pluie Extrême", 0))
-        }
+    # Mapping des colonnes attendues
+    mapping = {
+        "Jours Canicule": "Jours Canicule",
+        "Nuits Tropicales": "Nuits Tropicales",
+        "Sécheresse Sol": "Sécheresse Sol",
+        "Pluie Extrême": "Pluie Extrême"
     }
+
+    # DIAGNOSTIC 2 : Vérification des noms de colonnes
+    # On teste les préfixes RCP45_ et RCP85_
+    result = {}
+    for rcp in ["RCP 4.5", "RCP 8.5"]:
+        prefix = "RCP45_" if rcp == "RCP 4.5" else "RCP85_"
+        data_rcp = {}
+        for label, col_suffix in mapping.items():
+            col_name = f"{prefix}{col_suffix}"
+
+            # Essai direct
+            if col_name in row:
+                data_rcp[label] = int(row[col_name])
+            else:
+                # Si échec, on signale l'erreur une seule fois
+                if "error_shown" not in st.session_state:
+                    st.error(
+                        f"⚠️ Colonne manquante : '{col_name}'. Colonnes disponibles : {df_clim.columns.tolist()[:5]}...")
+                    st.session_state.error_shown = True
+                data_rcp[label] = 0
+        result[rcp] = data_rcp
+
+    return result
 
 # =============================================================================
 # 3. OPENSTREETMAP & ORS (DATA FETCHING)
